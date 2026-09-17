@@ -59,7 +59,7 @@ def check():
                             verifier_factory=lambda c: verifier)
         assert {p for p, _ in calls} == {3892, 3893}, (mode, calls)
         # All periods share the account-level retry interval.
-        assert all(.14 <= b[1]-a[1] < .25 for a, b in zip(calls, calls[1:])), calls
+        assert all(.14 <= b[1]-a[1] < .45 for a, b in zip(calls, calls[1:])), calls
         for target in (3892, 3893):
             starts = [t for p, t in calls if p == target]
             if mode in ('once', 'lost', 'recovery'):

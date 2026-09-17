@@ -302,6 +302,9 @@ def test_startup_availability():
     calendar['data']['2026-09-18']['1031']['3893']['num'] = '0'
     expected = {date(2026,9,16): {3893}, date(2026,9,17): {3893}, date(2026,9,18): {3892}}
     assert r.available_slots(calendar, own, current) == expected
+    assert r.available_slots(calendar, own, current, slot_numbers={1}) == {
+        date(2026, 9, 18): {3892}
+    }
     client = Mock()
     client.calendar.return_value = calendar
     client.mine.return_value = own
@@ -362,6 +365,8 @@ def check():
     for cells in calendar['data'][str(day)].values():
         for cell in cells.values():
             cell.update(status=0,num='1')
+    assert r.selected_period_ids(calendar, {1}) == {3892}
+    assert r.selected_period_ids(calendar, {2}) == {3893}
     def record(period, rid=1030):
         p=next(p for p in calendar['time'] if p['id']==period)
         return {'id':period,'group_id':1029,'resource_id':rid,'status':3,'status_name':'已预约',

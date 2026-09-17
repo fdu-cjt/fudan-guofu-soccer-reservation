@@ -170,9 +170,23 @@ class Client(_SoccerClient):
         )
 
 
-def available_slots(calendar, own, current):
+def selected_period_ids(calendar, slot_numbers):
+    """Map user-facing slot numbers to the validated platform period IDs."""
+    if slot_numbers is None:
+        return None
+    numbers = {int(value) for value in slot_numbers}
+    if not numbers or not numbers <= {1, 2}:
+        raise ValueError("预约时段只能选择 1（18:00-19:00）或 2（19:00-20:00）。")
+    periods = calendar_periods(calendar)
+    return {periods[number - 1]["id"] for number in numbers}
+
+
+def available_slots(calendar, own, current, slot_numbers=None):
     """Only explicit availability in the validated booking range may start an immediate attempt."""
     periods = calendar_periods(calendar)
+    selected = selected_period_ids(calendar, slot_numbers)
+    if selected is not None:
+        periods = [period for period in periods if period["id"] in selected]
     available = {}
     for day_text, fields in sorted(calendar["data"].items()):
         day = date.fromisoformat(day_text)
@@ -660,11 +674,11 @@ def target_day(anchor, offset_days=2):
     return anchor + timedelta(days=offset_days)
 
 
-def book_available(client, cutoff, anti_bot):
+def book_available(client, cutoff, anti_bot, slot_numbers=None):
     current = now()
     calendar = client.calendar(current.date(), target_day(current.date()))
     own = client.mine()
-    candidates = available_slots(calendar, own, now())
+    candidates = available_slots(calendar, own, now(), slot_numbers=slot_numbers)
     audit("startup_availability", dates={str(day): sorted(ids) for day, ids in candidates.items()})
     confirmed = False
     for day in candidates:
@@ -672,7 +686,7 @@ def book_available(client, cutoff, anti_bot):
             break
         # Recheck each date: earlier attempts may take minutes, and quota can change meanwhile.
         calendar, own = client.calendar(day), client.mine()
-        targets = available_slots(calendar, own, now()).get(day)
+        targets = available_slots(calendar, own, now(), slot_numbers=slot_numbers).get(day)
         if not targets:
             continue
         start = min(datetime.fromisoformat(f"{day}T{p['start_time']}").replace(tzinfo=SHANGHAI)
@@ -728,6 +742,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="与 --check 相同。")
     parser.add_argument("--transport", choices=("browser", "http"), default="browser", help="默认使用本机 Chrome；http 保留用于对照。")
     parser.add_argument("--browser-profile", type=Path, default=LOCAL / "soccer-chrome", help="独立 Chrome 配置目录，用于保留登录状态。")
+    parser.add_argument("--slots", "--slot", "--periods", dest="slot_numbers", nargs="+", type=int,
+                        choices=(1, 2), metavar="N",
+                        help="预约时段：1=18:00-19:00，2=19:00-20:00；默认两个都预约。")
     parser.add_argument("--watch-seconds", type=float, default=0, help="仅用于 --check：每 15 秒并行检查四个只读接口。")
     parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_PATH, help="日志文件路径（每次运行重写）。")
     args = parser.parse_args()
@@ -744,6 +761,15 @@ def run(args):
     client, browser = None, None
     try:
         load_credentials()
+        slot_numbers = getattr(args, "slot_numbers", None)
+        if not isinstance(slot_numbers, (list, tuple, set)):
+            slot_numbers = None
+        else:
+            slot_numbers = set(slot_numbers)
+        if slot_numbers:
+            log("指定预约时段：" + ", ".join(
+                f"{number}（{('18:00-19:00' if number == 1 else '19:00-20:00')}）"
+                for number in sorted(slot_numbers)))
         preview = args.check or args.dry_run
         opening, deadline = next_window(now())
         startup = not preview and now() < opening
@@ -772,7 +798,8 @@ def run(args):
                 info = client.settings()
                 if startup:
                     preparation = opening-timedelta(minutes=5)
-                    if book_available(client, preparation if now() < preparation else opening, info["config"]["anti_bot"]):
+                    if book_available(client, preparation if now() < preparation else opening,
+                                      info["config"]["anti_bot"], slot_numbers=slot_numbers):
                         return
                     startup = False
                     log("启动检查未确认新增预约，等待早上放号。")
@@ -806,11 +833,12 @@ def run(args):
                 time.sleep(min(RECOVERY_RETRY_SECONDS, max(0, (deadline-now()).total_seconds())))
         if not prepared:
             raise RuntimeError("准备阶段未能恢复登录或完成规则检查，已到本次截止时间。")
+        target_periods = selected_period_ids(calendar, slot_numbers)
         audit("preparation", stage="ready", seconds_before_opening=round((opening-now()).total_seconds(), 3))
         dispatch_opening = (opening + timedelta(milliseconds=OPENING_GUARD_MS)
                             if not preview else None)
         poll(client, day, deadline, commit=not preview, once=preview, anti_bot=info["config"]["anti_bot"],
-             calendar=calendar, own=own, opening=dispatch_opening)
+             calendar=calendar, own=own, opening=dispatch_opening, target_periods=target_periods)
         if args.watch_seconds:
             watch_access(client, day, args.watch_seconds)
     except BaseException as exc:
