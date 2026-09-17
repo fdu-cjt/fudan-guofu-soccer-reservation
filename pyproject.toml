@@ -1,0 +1,16 @@
+[project]
+name = "fudan-reserve"
+version = "0.1.0"
+description = "复旦场地自动预约：讨论室（lims.fudan.edu.cn）与国福路足球场（booking.fudan.edu.cn）"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.32",
+    "cryptography>=44",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pillow>=11",
+]
+
+# 这不是一个要发布的包，只是用来锁定运行环境，因此不要尝试构建/安装自身。
+[tool.uv]
+package = false
