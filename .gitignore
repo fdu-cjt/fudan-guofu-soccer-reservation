@@ -1,0 +1,15 @@
+.local/*
+__pycache__/
+node_modules/
+.playwright-cli/
+.venv/
+
+# Local artifacts and separately cloned reference repositories
+/output/
+/FudanCourtReservation/
+.env
+.env.*
+credentials.env
+/logs/
+!.local/credentials.env
+*.py[cod]
