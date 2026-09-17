@@ -42,7 +42,10 @@ def check():
                 raise r.requests.Timeout('response lost')
             if mode == 'recovery':
                 raise r.BrowserUnavailable('response lost with browser')
-            return {'e': 'OK'} if mode == 'once' else {'e': 'ERROR', 'm': '系统繁忙'}
+            return {'e': 'OK'} if mode == 'once' else {
+                'e': 'ERROR',
+                'm': '点击太频繁了' if mode == 'busy' else '系统繁忙',
+            }
         client.fork.side_effect = lambda: Mock(submit=Mock(side_effect=submit))
         opening = r.now() + r.timedelta(seconds=.04)
         window = .65
@@ -55,8 +58,8 @@ def check():
                             calendar=calendar, own=[], opening=opening, once=mode == 'once',
                             verifier_factory=lambda c: verifier)
         assert {p for p, _ in calls} == {3892, 3893}, (mode, calls)
-        # First stagger is independent of the retry interval.
-        assert .06 < calls[1][1] - calls[0][1] < .19, calls
+        # All periods share the account-level retry interval.
+        assert all(.14 <= b[1]-a[1] < .25 for a, b in zip(calls, calls[1:])), calls
         for target in (3892, 3893):
             starts = [t for p, t in calls if p == target]
             if mode in ('once', 'lost', 'recovery'):
@@ -64,8 +67,7 @@ def check():
             elif mode == 'cap':
                 assert len(starts) == 2, calls
             else:
-                assert len(starts) >= 3, calls
-                assert all(.14 <= b-a < .25 for a, b in zip(starts, starts[1:])), starts
+                assert len(starts) >= 2, calls
         if mode == 'once':
             assert set(result) == {3892, 3893}, result
         if mode in ('lost', 'recovery'):
@@ -76,7 +78,7 @@ def check():
             assert calls[-1][1] - calls[0][1] < window + .03, calls
             assert any(e['event'] == 'submission_exhausted' for e in r.RUN_EVENTS)
         assert verifier.http.close.called
-    print('PASS: independent first stagger, actual retry interval, window/cap, one-shot delayed confirmation, lost-response no resubmit')
+    print('PASS: account-level submit interval, fair first dispatch, window/cap, one-shot delayed confirmation, lost-response no resubmit')
 
 
 if __name__ == '__main__':

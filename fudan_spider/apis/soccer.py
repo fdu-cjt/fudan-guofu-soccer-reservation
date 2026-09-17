@@ -301,12 +301,14 @@ class Client:
 
 def own_slot(records, day, period_id, resource_id=None):
     for record in records:
-        if record["group_id"] != RESOURCE or record["status"] in {-1, 0} or record.get("is_cancel"):
+        # is_cancel=1 means the user may cancel the reservation; it does not
+        # mean that the reservation itself is canceled. Status 0 is canceled.
+        if record["group_id"] != RESOURCE or record["status"] in {-1, 0}:
             continue
         if resource_id is not None and record["resource_id"] != resource_id:
             continue
         for slot in record["detail"].get(day, []):
-            if slot["period_id"] == period_id and not slot.get("is_cancel"):
+            if slot["period_id"] == period_id:
                 return record
     return None
 

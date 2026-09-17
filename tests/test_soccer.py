@@ -147,13 +147,12 @@ def test_request_policy(tmp):
 
 
 def test_parallel_dispatch():
-    """两个时段各自只有一笔在途请求，慢响应不会叠加同一时段 POST。"""
+    """同一账号的两个时段串行提交，并共享最小提交间隔。"""
     day = date(2026, 9, 17)
     calendar = json.loads((Path(__file__).parent / 'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     client, verifier = Mock(), Mock()
     client.mine.return_value = verifier.mine.return_value = []
     workers, calls, ends = [], [], []
-    first_pair = threading.Barrier(2)
     guard = threading.Lock()
     opening = r.now() + r.timedelta(seconds=.03)
     deadline = opening + r.timedelta(seconds=1.05)
@@ -161,12 +160,10 @@ def test_parallel_dispatch():
         periods = json.loads(payload['data'])[0]['period']
         assert len(periods) == 1
         with guard:
-            index = len(calls)
             calls.append((periods[0]['period_id'], time.monotonic(), r.now()))
-        if index < 2:
-            first_pair.wait(timeout=2)
-        time.sleep(1.1)
-        ends.append(time.monotonic())
+        time.sleep(.04)
+        with guard:
+            ends.append(time.monotonic())
         return {'e': 'ERROR', 'm': '系统繁忙，请稍后再试'}
     def fork():
         worker = Mock()
@@ -178,10 +175,10 @@ def test_parallel_dispatch():
          patch.object(r, 'VERIFY_INTERVAL_SECONDS', .01):
         r.poll(client, day, deadline, calendar=calendar, own=[], anti_bot=0,
                opening=opening, verifier_factory=lambda c: verifier)
-    assert len(calls) == 2, calls
+    assert len(calls) >= 2, calls
     assert {p for p, _, _ in calls[:2]} == {3892, 3893}
-    assert .075 <= calls[1][1] - calls[0][1] < .18, calls
-    assert min(ends) > max(t for _, t, _ in calls), '在途请求收尾前不应叠加同一时段提交'
+    assert .18 <= calls[1][1] - calls[0][1], calls
+    assert calls[1][1] >= ends[0], '账号级提交不能重叠在途请求'
     assert all(opening <= t < deadline for _, _, t in calls), calls
     assert all(w.http.close.called for w in workers) and verifier.http.close.called
     assert verifier.mine.call_count == 1, verifier.mine.call_count
@@ -377,8 +374,13 @@ def check():
     assert payload['captcha']=='{}'
     with_captcha = r.make_payload(day, calendar['resource'], calendar['time'][0], {'token':'t1','pointJson':'p1'})
     assert json.loads(with_captcha['captcha']) == {'token':'t1','pointJson':'p1'}
+    active = copy.deepcopy(record(3892))
+    active['is_cancel'] = 1
+    active['detail'][str(day)][0]['is_cancel'] = 1
+    assert r.own_slot([active],str(day),3892) is active
     assert r.own_slot([dict(record(3892),status=0)],str(day),3892) is None
     assert r.own_slot([dict(record(3892),group_id=999)],str(day),3892) is None
+    assert r._submission_kind({'e': 'ERROR', 'm': '点击太频繁了'})[0] == 'retry'
 
     test_parallel_dispatch()
     test_recovery_and_ok_wakeup()

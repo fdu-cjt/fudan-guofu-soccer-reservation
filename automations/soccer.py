@@ -28,7 +28,6 @@ from fudan_spider.utils import SHANGHAI
 
 CAPTCHA_POOL_SIZE = 2
 SUBMIT_INTERVAL_SECONDS = 2.0
-FIRST_SUBMISSION_STAGGER_SECONDS = 0.1
 RETRY_WINDOW_SECONDS = 30
 MAX_SUBMISSION_ATTEMPTS = 15
 MAX_VERIFICATION_ATTEMPTS = 6
@@ -205,6 +204,8 @@ def _submission_kind(response):
             word in text for word in ("429", "too many", "访问频繁", "请求过于频繁", "拒绝访问",
                                       "防护", "blocked")):
         return "blocked", message
+    if any(word in text for word in ("点击太频繁", "操作太频繁", "提交太频繁")):
+        return "retry", message
     if any(word in text for word in ("预约次数", "最多预约", "没有权限", "无权限", "表单", "手机号",
                                      "规则发生变化", "规则已变更", "不允许预约")):
         return "account_stop", message
@@ -248,7 +249,9 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
     attempts, generation, recovery_attempts = 0, 0, 0
     attempts_by_target = {period["id"]: 0 for period in periods}
     in_flight, awaiting_verification = set(), set()
-    last_submit_at, retry_after = {}, {}
+    # All periods share one account-level submission cadence. The platform may
+    # rate-limit the account even when the two periods use different payloads.
+    last_submit_at, retry_after = -float("inf"), {}
     pool = queue.Queue(maxsize=CAPTCHA_POOL_SIZE)
     if isinstance(client.http, BrowserSession):
         client.http.window = (opening.timestamp()*1000, submission_deadline.timestamp()*1000)
@@ -403,10 +406,11 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     stop.wait(.2)
 
     local = threading.local()
-    # One worker per validated target; in_flight is the duplicate-submit guard.
-    executor = ThreadPoolExecutor(max_workers=len(periods))
+    # One account-level submission worker; verification remains independent.
+    executor = ThreadPoolExecutor(max_workers=1)
 
     def submit(target, payload, planned_at):
+        nonlocal last_submit_at
         epoch = generation
         try:
             if stop.is_set() or not ready.is_set() or now() >= submission_deadline:
@@ -418,7 +422,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             if isinstance(local.client.http, BrowserSession):
                 local.client.http.planned_at = planned_at
             with lock:
-                last_submit_at[target] = time.monotonic()
+                last_submit_at = time.monotonic()
             response = local.client.submit(payload)
             if not isinstance(response, dict) or "e" not in response:
                 raise ValueError("预约响应结构错误")
@@ -475,7 +479,11 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             elif kind == "target_stop":
                 halt_target(target, message)
             else:
-                audit("submission_retry", code=str(response.get("e"))[:80], message=message, targets=[target])
+                delay = SUBMIT_INTERVAL_SECONDS
+                with lock:
+                    retry_after[target] = max(retry_after.get(target, 0), time.monotonic() + delay)
+                audit("submission_retry", code=str(response.get("e"))[:80], message=message,
+                      retry_after=delay, targets=[target])
         finally:
             with lock:
                 in_flight.discard(target)
@@ -483,8 +491,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
     threads = [threading.Thread(target=verify, name="soccer-verifier"),
                threading.Thread(target=produce_captcha, name="soccer-captcha")]
     anchor = time.monotonic() + (opening-now()).total_seconds()
-    first_due = {p['id']: anchor + i * FIRST_SUBMISSION_STAGGER_SECONDS
-                 for i, p in enumerate(periods)}
+    first_due = {p['id']: anchor for p in periods}
     try:
         for thread in threads:
             thread.start()
@@ -546,13 +553,24 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 else:
                     pending.append(future)
             futures = pending
-            for period in periods:
+            # Give untouched periods their first opportunity before retrying a
+            # period that already received a response; otherwise a fast busy
+            # response from the first period can starve the second one.
+            ordered_periods = sorted(
+                periods,
+                key=lambda period: (
+                    attempts_by_target[period["id"]] > 0,
+                    period["id"],
+                ),
+            )
+            for period in ordered_periods:
                 if stop.is_set() or recovery_needed.is_set():
                     break
                 with lock:
                     target = period["id"]
                     current_mono = time.monotonic()
-                    if target in confirmed or target in halted or target in awaiting_verification or target in in_flight:
+                    if (in_flight or target in confirmed or target in halted
+                            or target in awaiting_verification):
                         continue
                     if now() >= submission_deadline or attempts_by_target[target] >= attempt_limit:
                         halted[target] = "提交窗口结束" if now() >= submission_deadline else "已达到提交次数上限"
@@ -560,7 +578,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                         maybe_stop_locked()
                         continue
                     due = max(first_due[target], retry_after.get(target, 0),
-                              last_submit_at.get(target, -float("inf")) + SUBMIT_INTERVAL_SECONDS)
+                              last_submit_at + SUBMIT_INTERVAL_SECONDS)
                     if current_mono < due:
                         continue
                     planned_at = (opening.timestamp() + due - anchor) * 1000
