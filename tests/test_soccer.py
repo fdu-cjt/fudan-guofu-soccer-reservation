@@ -101,7 +101,7 @@ def test_cas_login(tmp):
         key.encrypt.return_value = b'encrypted'
         with patch.object(client.http, 'get', return_value=entry), \
              patch.object(client.http, 'post', side_effect=responses) as post, \
-             patch('fudan_spider.apis.soccer.load_der_public_key', return_value=key), \
+             patch('fudan_spider.apis.soccer_api.load_der_public_key', return_value=key), \
              patch.object(client, 'finish_login') as finish:
             client.cas_login()
             assert post.call_args_list[3].kwargs['json']['authPara']['password'] == 'ZW5jcnlwdGVk'

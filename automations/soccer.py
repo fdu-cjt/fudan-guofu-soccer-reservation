@@ -18,7 +18,7 @@ import requests
 from captcha_slide import CaptchaError
 from soccer_browser import BrowserBridge, BrowserSession, BrowserUnavailable, SubmissionSkipped
 
-from fudan_spider.apis.soccer import (
+from fudan_spider.apis.soccer_api import (
     API, BASE, CREDENTIALS, DEFAULT_LOG_PATH, IDP, LOCAL, PAGE, PASSWORD,
     PHONE, RESOURCE, SSO, STATE, USER, VENUE,
     AccessBlocked, Client as _SoccerClient, SessionExpired, TransientError,
@@ -28,8 +28,8 @@ from fudan_spider.utils import SHANGHAI, load_env_file
 
 CAPTCHA_POOL_SIZE = 2
 SUBMIT_INTERVAL_SECONDS = 2.0
-RETRY_WINDOW_SECONDS = 30
-MAX_SUBMISSION_ATTEMPTS = 15
+RETRY_WINDOW_SECONDS = 120
+MAX_SUBMISSION_ATTEMPTS = 60
 MAX_VERIFICATION_ATTEMPTS = 6
 MAX_RECOVERY_ATTEMPTS = 3
 VERIFY_INTERVAL_SECONDS = 0.5

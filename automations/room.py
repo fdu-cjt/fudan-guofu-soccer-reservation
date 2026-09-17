@@ -15,8 +15,8 @@ import threading
 
 import requests
 
-from fudan_spider.apis import room as room_api
-from fudan_spider.apis.room import (
+from fudan_spider.apis import room_api
+from fudan_spider.apis.room_api import (
     APP, BASE, PASSWORD, PHONE, ROOM, ROOMS, STATE, USER,
     Client as _RoomClient, RateLimited, SessionExpired,
 )
