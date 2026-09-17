@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.serialization import load_der_public_key, load_pem_public_key
 
 from fudan_spider.uis import LoginCallback, login_variables
-from fudan_spider.utils import save_json
+from fudan_spider.utils import load_env_file, save_json
 
 BASE = "https://lims.fudan.edu.cn"
 APP = "/api/appointment/"
@@ -19,9 +19,9 @@ ROOM = "551"
 ROOMS = {"551": "A103", "591": "B101"}
 LOCAL = Path(__file__).resolve().parents[2] / ".local"
 STATE = LOCAL / "session.json"
-_credentials_path = LOCAL / "room-credentials.json"
-_credentials = json.loads(_credentials_path.read_text(encoding="utf-8")) if _credentials_path.exists() else {}
-USER, PASSWORD, PHONE = (os.environ.get("FUDAN_" + key) or _credentials.get(key, "")
+CREDENTIALS = LOCAL / "credentials.env"
+_credentials = load_env_file(CREDENTIALS)
+USER, PASSWORD, PHONE = (os.environ.get("FUDAN_" + key) or _credentials.get("FUDAN_" + key, "")
                          for key in ("USER", "PASSWORD", "PHONE"))
 VERBOSE_HTTP = False
 

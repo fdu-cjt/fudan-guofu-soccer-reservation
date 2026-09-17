@@ -58,7 +58,7 @@ uv run --locked python -m automations.room --rooms A103 B101
 - `SUBMISSION_TIMEOUT_SECONDS = 8`：单次提交的读取超时，单位秒。
 - `VERBOSE_HTTP = False`：需要逐请求耗时时可打开。
 
-保持终端打开；Ctrl+C 停止。停止后已经发出的请求可能仍需等待网络返回。电脑休眠、断网和本机时钟误差会影响运行。账号、密码和手机号读取 `.local/room-credentials.json`（格式见 `room-credentials.example.json`），环境变量 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE` 优先；验证码或额外认证仍需要人工处理。
+保持终端打开；Ctrl+C 停止。停止后已经发出的请求可能仍需等待网络返回。电脑休眠、断网和本机时钟误差会影响运行。房间和足球预约共用 `.local/credentials.env`，模板见 `credentials.example.env`；环境变量 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE` 优先。验证码或额外认证仍需要人工处理。
 
 ### 检查与文件
 
@@ -97,7 +97,7 @@ uv run --locked python -m automations.soccer --slots 1 2    # 两个时段
 
 实际路径为 Python → 常驻 Node Playwright → 本机 Chrome → 页面内 fetch。
 Chrome 使用独立配置 `.local/soccer-chrome`，会话保存在该目录；无需另外下载浏览器。
-`.local/credentials.env` 提供 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE`，环境变量优先。
+复制 `credentials.example.env` 为 `.local/credentials.env`，填写 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE`；环境变量优先。`.local/` 和本地凭据文件已被 `.gitignore` 忽略，推送 GitHub 时只会提交示例文件；不要用 `git add -f` 强行加入真实凭据。
 
 ### 业务与时间
 

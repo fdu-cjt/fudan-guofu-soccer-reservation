@@ -24,7 +24,7 @@ from fudan_spider.apis.soccer import (
     AccessBlocked, Client as _SoccerClient, SessionExpired, TransientError,
     calendar_periods, make_payload, own_slot, slide_solver,
 )
-from fudan_spider.utils import SHANGHAI
+from fudan_spider.utils import SHANGHAI, load_env_file
 
 CAPTCHA_POOL_SIZE = 2
 SUBMIT_INTERVAL_SECONDS = 2.0
@@ -100,20 +100,11 @@ def audit(event, **fields):
 def load_credentials():
     """按「.env 文件 < 环境变量」的顺序读取账号密码手机号，并填好日志脱敏名单。"""
     global USER, PASSWORD, PHONE, SECRETS
-    file_values = {}
     try:
-        raw = CREDENTIALS.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raw = ""
+        file_values = load_env_file(CREDENTIALS)
     except OSError as exc:
         log(f"凭据文件不可读（{type(exc).__name__}），改用环境变量。")
-        raw = ""
-    for line in raw.splitlines():
-        text = line.strip()
-        if not text or text.startswith("#") or "=" not in text:
-            continue
-        name, value = text.split("=", 1)
-        file_values[name.strip().upper()] = value.strip().strip("'\"")
+        file_values = {}
     origin = {}
     targets = {"FUDAN_USER": "USER", "FUDAN_PASSWORD": "PASSWORD", "FUDAN_PHONE": "PHONE"}
     for name, global_name in targets.items():

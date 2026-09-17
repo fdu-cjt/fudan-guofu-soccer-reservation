@@ -9,4 +9,5 @@ node_modules/
 /FudanCourtReservation/
 .env
 .env.*
+credentials.env
 *.py[cod]
