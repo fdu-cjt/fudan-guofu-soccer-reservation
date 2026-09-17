@@ -731,7 +731,7 @@ def hold_browser(close_browser=False):
     """Keep the visible Chrome page available for manual follow-up."""
     if close_browser:
         return
-    log("预约流程已结束，浏览器窗口保留；完成验证码或确认操作后按 Enter 关闭浏览器。")
+    log("预约程序已停止，浏览器窗口保留；完成验证码或确认操作后按 Enter 关闭浏览器。")
     try:
         input("按 Enter 关闭浏览器（Ctrl+C 也会关闭）：")
     except (EOFError, KeyboardInterrupt):
@@ -748,7 +748,7 @@ def main():
                         choices=(1, 2), metavar="N",
                         help="预约时段：1=18:00-19:00，2=19:00-20:00；默认两个都预约。")
     parser.add_argument("--close-browser", action="store_true",
-                        help="预约结束后直接关闭 Chrome；默认保留窗口等待手动处理。")
+                        help="停止程序后直接关闭 Chrome；默认保留窗口等待手动处理。")
     parser.add_argument("--watch-seconds", type=float, default=0, help="仅用于 --check：每 15 秒并行检查四个只读接口。")
     parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_PATH, help="日志文件路径（每次运行重写）。")
     args = parser.parse_args()
@@ -759,7 +759,7 @@ def main():
         run(args)
 
 
-def run(args):
+def run(args, continuous=True):
     path, reason = setup_logging(args.log_file)
     log(f"日志文件：{path}" + (f"（不可写：{reason}）" if reason else "（本次运行重写）"))
     client, browser = None, None
@@ -774,77 +774,88 @@ def run(args):
             f"{number}（{('18:00-19:00' if number == 1 else '19:00-20:00')}）"
             for number in sorted(slot_numbers)))
         preview = args.check or args.dry_run
-        opening, deadline = next_window(now())
-        startup = not preview and now() < opening
-        if preview:
-            deadline = now() + timedelta(seconds=90)
-        else:
-            log(f"先检查已开放空位；无确认成功则等待 {opening:%Y-%m-%d %H:%M}–{deadline:%H:%M} 放号窗口。")
-        day = target_day(now().date() if preview else opening.date())
-        must_login, prepared = True, False
-        preparation_failures = 0
-        while now() < deadline:
-            try:
-                new_client = client is None
-                if new_client:
-                    if args.transport == "browser":
-                        browser = BrowserBridge(read_only=preview, profile=args.browser_profile.resolve(),
-                            on_event=lambda fields: audit("browser_progress", **fields), deadline=deadline.timestamp())
-                        audit("browser", **browser.info)
-                    client = Client(browser=browser)
-                if must_login:
-                    client.login(deadline) if new_client else client.recover(deadline)
-                else:
-                    user = client.data("/site/user/baseinfo")
-                    if str(user["number"]) != client.user:
-                        raise SessionExpired("浏览器账号发生变化，需要重新核对登录。")
-                info = client.settings()
-                if startup:
-                    preparation = opening-timedelta(minutes=5)
-                    if book_available(client, preparation if now() < preparation else opening,
-                                      info["config"]["anti_bot"], slot_numbers=slot_numbers):
-                        return
-                    startup = False
-                    log("启动检查未确认新增预约，等待早上放号。")
-                    wait_until(preparation)
-                    must_login = False
-                    continue
-                calendar, own = client.calendar(day), client.mine()
-                if not preview and now() < opening-timedelta(minutes=3):
-                    audit("preparation", stage="logged_in")
-                    wait_until(opening-timedelta(minutes=3))
-                    must_login = False
-                    continue
-                prepared = True
-                break
-            except AccessBlocked:
-                raise
-            except TransientError as exc:
-                preparation_failures += 1
-                if _rate_limited(exc) or preparation_failures >= MAX_RECOVERY_ATTEMPTS:
+        first_cycle = True
+        must_login = True
+        while True:
+            opening, deadline = next_window(now())
+            if preview:
+                deadline = now() + timedelta(seconds=90)
+            elif first_cycle:
+                log(f"先检查已开放空位；即使已有预约也继续等待 {opening:%Y-%m-%d %H:%M}–{deadline:%H:%M} 放号窗口，07:00 进入提交。")
+            else:
+                log(f"等待下一次放号准备：{opening:%Y-%m-%d %H:%M}–{deadline:%H:%M}，07:00 进入提交；已预约时段会自动跳过。")
+            day = target_day(now().date() if preview else opening.date())
+            startup = first_cycle and not preview
+            prepared = False
+            preparation_failures = 0
+            while now() < deadline:
+                try:
+                    new_client = client is None
+                    if new_client:
+                        if args.transport == "browser":
+                            browser = BrowserBridge(read_only=preview, profile=args.browser_profile.resolve(),
+                                on_event=lambda fields: audit("browser_progress", **fields), deadline=deadline.timestamp())
+                            audit("browser", **browser.info)
+                        client = Client(browser=browser)
+                    if must_login:
+                        client.login(deadline) if new_client else client.recover(deadline)
+                        must_login = False
+                    else:
+                        user = client.data("/site/user/baseinfo")
+                        if str(user["number"]) != client.user:
+                            raise SessionExpired("浏览器账号发生变化，需要重新核对登录。")
+                    info = client.settings()
+                    if startup:
+                        preparation = opening-timedelta(minutes=5)
+                        book_available(client, preparation if now() < preparation else opening,
+                                       info["config"]["anti_bot"], slot_numbers=slot_numbers)
+                        first_cycle = False
+                        startup = False
+                        log("启动检查完成；无论是否提前预约成功，继续等待本轮早上放号。")
+                        wait_until(preparation)
+                        continue
+                    calendar, own = client.calendar(day), client.mine()
+                    if not preview and now() < opening-timedelta(minutes=3):
+                        audit("preparation", stage="logged_in")
+                        wait_until(opening-timedelta(minutes=3))
+                        continue
+                    prepared = True
+                    break
+                except AccessBlocked:
                     raise
-                audit("preparation_retry", error=type(exc).__name__, reason=str(exc)[:200])
-                must_login = True
-                time.sleep(min(max(RECOVERY_RETRY_SECONDS, exc.retry_after or 0),
-                               max(0, (deadline-now()).total_seconds())))
-            except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
-                preparation_failures += 1
-                if preparation_failures >= MAX_RECOVERY_ATTEMPTS:
-                    raise
-                audit("preparation_retry", error=type(exc).__name__, reason=str(exc)[:200])
-                must_login = True
-                time.sleep(min(RECOVERY_RETRY_SECONDS, max(0, (deadline-now()).total_seconds())))
-        if not prepared:
-            raise RuntimeError("准备阶段未能恢复登录或完成规则检查，已到本次截止时间。")
-        target_periods = (selected_period_ids(calendar, slot_numbers)
-                          if isinstance(calendar, dict) else None)
-        audit("preparation", stage="ready", seconds_before_opening=round((opening-now()).total_seconds(), 3))
-        dispatch_opening = (opening + timedelta(milliseconds=OPENING_GUARD_MS)
-                            if not preview else None)
-        poll(client, day, deadline, commit=not preview, once=preview, anti_bot=info["config"]["anti_bot"],
-             calendar=calendar, own=own, opening=dispatch_opening, target_periods=target_periods)
-        if args.watch_seconds:
-            watch_access(client, day, args.watch_seconds)
+                except TransientError as exc:
+                    preparation_failures += 1
+                    if _rate_limited(exc) or preparation_failures >= MAX_RECOVERY_ATTEMPTS:
+                        raise
+                    audit("preparation_retry", error=type(exc).__name__, reason=str(exc)[:200])
+                    must_login = True
+                    time.sleep(min(max(RECOVERY_RETRY_SECONDS, exc.retry_after or 0),
+                                   max(0, (deadline-now()).total_seconds())))
+                except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+                    preparation_failures += 1
+                    if preparation_failures >= MAX_RECOVERY_ATTEMPTS:
+                        raise
+                    audit("preparation_retry", error=type(exc).__name__, reason=str(exc)[:200])
+                    must_login = True
+                    time.sleep(min(RECOVERY_RETRY_SECONDS, max(0, (deadline-now()).total_seconds())))
+            if not prepared:
+                raise RuntimeError("准备阶段未能恢复登录或完成规则检查，已到本次截止时间。")
+            target_periods = (selected_period_ids(calendar, slot_numbers)
+                              if isinstance(calendar, dict) else None)
+            audit("preparation", stage="ready", seconds_before_opening=round((opening-now()).total_seconds(), 3))
+            dispatch_opening = (opening + timedelta(milliseconds=OPENING_GUARD_MS)
+                                if not preview else None)
+            poll(client, day, deadline, commit=not preview, once=preview, anti_bot=info["config"]["anti_bot"],
+                 calendar=calendar, own=own, opening=dispatch_opening, target_periods=target_periods)
+            if args.watch_seconds:
+                watch_access(client, day, args.watch_seconds)
+            if preview or not continuous:
+                return
+            first_cycle = False
+            next_opening = next_window(opening + timedelta(minutes=5))[0]
+            audit("window_complete", next_opening=next_opening.isoformat())
+            wait_until(next_opening - timedelta(minutes=5))
+            must_login = False
     except BaseException as exc:
         audit("run_error", error=type(exc).__name__)
         raise

@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -286,7 +286,7 @@ def test_early_preparation():
             patch.object(r, 'book_available', return_value=False) as startup:
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
                     log_file=Path(directory)/'prepare.log')
-        r.run(args)
+        r.run(args, continuous=False)
         assert waits == ['06:55', '06:57'], waits
         client.login.assert_called_once()
         client.recover.assert_not_called()
@@ -346,22 +346,70 @@ def test_startup_availability():
     assert worker.submit.called
     assert all(json.loads(c.args[0]['data'])[0]['period'][0]['period_id'] == 3893
                for c in worker.submit.call_args_list)
-    # A successful startup pass exits after all dates were handled, without waiting overnight.
+    # A successful startup pass still reaches the official opening window.
     client = Mock(user='test')
     client.settings.return_value = {'config': {'anti_bot': 0}}
+    client.data.return_value = {'number': 'test'}
+    clock = [current]
+    def advance(moment):
+        clock[0] = moment
     with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
-            patch.object(r, 'now', return_value=current), patch.object(r, 'wait_until') as wait, \
+            patch.object(r, 'now', side_effect=lambda: clock[0]), patch.object(r, 'wait_until', side_effect=advance) as wait, \
             patch.object(r, 'Client', return_value=client), patch.object(r, 'poll') as poll, \
             patch.object(r, 'book_available', side_effect=[r.SessionExpired('expired'), True]) as startup, \
             patch.object(r.time, 'sleep'):
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
                     log_file=Path(directory)/'startup.log')
-        r.run(args)
+        r.run(args, continuous=False)
         assert startup.call_count == 2  # A failed scan is retried, never treated as an empty calendar.
         client.recover.assert_called_once()
-        wait.assert_not_called()
-        poll.assert_not_called()
+        assert [call.args[0] for call in wait.call_args_list] == [
+            current.replace(day=17, hour=6, minute=55),
+            current.replace(day=17, hour=6, minute=57),
+        ]
+        poll.assert_called_once()
         client.http.close.assert_called_once()
+
+
+def test_continuous_windows():
+    """Normal runs keep the session and enter the next day's release window."""
+    clock = [datetime(2026, 9, 17, 6, 54, tzinfo=r.SHANGHAI)]
+    waits, poll_days = [], []
+    calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
+    client = Mock(user='test')
+    client.settings.return_value = {'config': {'anti_bot': 0}}
+    client.data.return_value = {'number': 'test'}
+    client.calendar.return_value = calendar
+    client.mine.return_value = []
+    opening = clock[0].replace(hour=7, minute=0, second=0, microsecond=0)
+    def wait(moment):
+        waits.append(moment)
+        clock[0] = moment
+    def poll(*args, **kwargs):
+        poll_days.append(args[1])
+        if len(poll_days) == 1:
+            clock[0] = opening + timedelta(minutes=5)
+            return {}
+        raise KeyboardInterrupt
+    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
+            patch.object(r, 'now', side_effect=lambda: clock[0]), patch.object(r, 'wait_until', side_effect=wait), \
+            patch.object(r, 'Client', return_value=client), patch.object(r, 'book_available', return_value=True), \
+            patch.object(r, 'poll', side_effect=poll):
+        args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
+                    log_file=Path(directory)/'continuous.log')
+        try:
+            r.run(args)
+            assert False, 'test must stop the continuous worker after the second window'
+        except KeyboardInterrupt:
+            pass
+    assert poll_days == [date(2026, 9, 19), date(2026, 9, 20)], poll_days
+    assert waits == [
+        datetime(2026, 9, 17, 6, 55, tzinfo=r.SHANGHAI),
+        datetime(2026, 9, 17, 6, 57, tzinfo=r.SHANGHAI),
+        datetime(2026, 9, 18, 6, 55, tzinfo=r.SHANGHAI),
+        datetime(2026, 9, 18, 6, 57, tzinfo=r.SHANGHAI),
+    ], waits
+    client.http.close.assert_called_once()
 
 
 def check():
@@ -402,6 +450,7 @@ def check():
     test_browser_hold()
     test_early_preparation()
     test_startup_availability()
+    test_continuous_windows()
 
     with TemporaryDirectory() as tmp, patch.object(r, 'LOCAL', Path(tmp)), \
             patch.object(r, 'DEFAULT_LOG_PATH', Path(tmp) / 'default.log'), patch.object(r, 'log'):
@@ -562,7 +611,7 @@ def check():
           'acceptance/timeout verification, anti_bot 0/1 CAPTCHA pool, TransientError backoff, verifier close, '
           'deadline, credentials, log file, no run report, limited recovery, parallel verification after recovery, '
           '06:57 preparation, second-instance log protection, all-date startup availability, per-date recheck, '
-          'subset dispatch, one-shot startup attempt, startup recovery/fallback')
+          'subset dispatch, continuous release windows, one-shot startup attempt, startup recovery/fallback')
 
 
 if __name__=='__main__':check()
