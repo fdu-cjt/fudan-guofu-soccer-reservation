@@ -1,138 +1,157 @@
-# 复旦自动预约
+# 复旦大学国福路足球场预约
 
-本项目按 `fudan_spider` 核心库和 `automations` 自动化入口组织：
-`fudan_spider/apis/room_api.py` 负责讨论室平台接口，`fudan_spider/apis/soccer_api.py` 负责足球平台接口，
-`automations/room.py` 和 `automations/soccer.py` 负责各自的调度。
-旧的 `reserve.py`、`reserve_soccer.py` 已移除，统一从 `automations` 模块启动。
+通过复旦 UIS 登录预约平台，预约国福路足球场的 **18:00–19:00** 和 **19:00–20:00** 时段。启动时先尝试已开放的空位，然后持续等待每天早上 07:00 放号；预约成功后继续运行，浏览器保持打开，方便人工查看结果。
 
-## 讨论室预约（默认 A103）
+当前版本：**v1.2.0**。当前代码只包含足球场预约；讨论室预约已移除，旧版仍保存在 Git 历史和版本标签中。
 
-### 启动
+## 运行环境
 
-```powershell
-cd D:\a103
-uv run --locked python -m automations.room
-```
+- Windows 11 / PowerShell；当前浏览器启动和进程管理按 Windows 实现。
+- Python 3.12 或更新版本，以及 uv。
+- Node.js / npm；浏览器依赖由 package-lock.json 锁定。
+- 本机已安装 Google Chrome 或 Microsoft Edge，无需另行下载 Playwright 浏览器。
+- 可使用学校预约平台的 UIS 账号，以及预约所需手机号。
 
-通过 `--rooms` 选择房间：
+## 安装与配置
 
 ```powershell
-uv run --locked python -m automations.room --rooms A103
-uv run --locked python -m automations.room --rooms B101
-uv run --locked python -m automations.room --rooms A103 B101
-```
-
-不传参数默认 A103；重复名称自动去重，无效名称在启动时拒绝。多个房间并行预约，各自核实和停止，目标是两个都约，一个成功不会停止另一个。每个房间沿用下面的提交节奏和各自的服务器规则。共享会话的登录与缓存写入串行执行，避免文件冲突。一次只运行一个讨论室进程，多房间请放在同一条命令中。
-
-启动后等待下一个有效整点，提前 15 秒登录、读取开放规则并准备请求。只抢该整点刚开放的一个小时，不查询空位，不扫描其他时段。
-
-默认目标为明天 08:00–22:00，按结束时间进入未来 24 小时的规则提交：
-
-- 今天 09:00 → 明天 08:00–09:00。
-- 今天 19:00 → 明天 18:00–19:00。
-- 今天 22:00 → 明天 21:00–22:00。
-- 22:00 后等待次日 09:00；正常启动不会立即创建预约。
-
-仍会检查服务器开放日期、星期、关闭时段、最小/最大提前时间及时间格规则。不符合规则就跳过。预约用途固定为“面试”。
-
-### 提交节奏
-
-- 每个窗口 30 秒，每 100 毫秒发起一次，最多 300 次；用线程并发，不等待上一笔响应后才发下一笔。
-- 超时、无法识别的响应、明确的暂时时段冲突，以及“系统繁忙！由于当前使用人数较多，请稍后再试！”不打断发起节奏；提交异常会记录异常类型。
-- 明确接收成功后停止新增请求；已经发出的请求允许完成，仍可能产生重复提交或重复记录。
-- 课程冲突确认提示、权限/次数限制等不可重试拒绝、登录失效或 HTTP 429 限流会停止新增请求。
-- 每个请求连接超时 3.05 秒、读取超时 8 秒。读取超时并非严格的请求总时限，客户端超时也不取消服务端处理。
-- 提交期间使用独立会话并发查询自己的预约，目标查询起始间隔为 500 毫秒；上一轮未返回时不叠加查询，不阻塞 100 毫秒的提交节拍。查到目标时间的有效记录就停止新增提交；取消、拒绝或其他时段的记录不触发停止。查询网络异常时提交继续。
-- 窗口结束并等待已发请求收尾后，再查一次自己的预约，打印实际记录数量和状态；查不到只报告未确认。
-- 100 毫秒为发起的目标间隔，受 Windows 调度和网络影响，不保证每次精确命中；错过的节拍跳过，不集中补发。
-- 不再读取或写入 pending 预约标记；旧 pending 文件不影响运行。
-
-### 配置
-
-在 `automations/room.py` 顶部修改后重启生效：
-
-- `START_HOUR = 8`、`END_HOUR = 22`：希望预约的每日时间范围，每次一小时。
-- `RETRY_WINDOW_SECONDS = 30`：整点后的提交窗口。
-- `SUBMIT_INTERVAL_SECONDS = 0.1`：固定发起间隔，单位秒。
-- `VERIFY_INTERVAL_SECONDS = 0.5`：并发核实的最短起始间隔，包含查询耗时，单位秒。
-- `SUBMISSION_TIMEOUT_SECONDS = 8`：单次提交的读取超时，单位秒。
-- `VERBOSE_HTTP = False`：需要逐请求耗时时可打开。
-
-保持终端打开；Ctrl+C 停止。停止后已经发出的请求可能仍需等待网络返回。电脑休眠、断网和本机时钟误差会影响运行。房间和足球预约共用 `.local/credentials.env`，模板见 `credentials.example.env`；环境变量 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE` 优先。验证码或额外认证仍需要人工处理。
-
-### 检查与文件
-
-运行模拟接口测试，不产生真实预约：
-
-```powershell
-uv run --locked python -B D:\a103\tests\test_room.py
-uv run --locked python -B D:\a103\tests\test_soccer.py
-```
-
-- `.local/session.json`：登录会话缓存。
-- `.local/runs.log`：运行日志。
-- `uv run --locked python -m automations.room --import-state <会话JSON路径>`：导入浏览器会话后退出。
-
-2026-09-15 非整点真实接口小样本测量：对已占用的明天 21:00–22:00，500/200/100 毫秒各发起最多两次，六次均返回时段冲突；响应耗时约 245–279 毫秒，未观察到限流，随后未查到该时段的有效预约记录。这个样本不能证明某个整点提交频率最优。详细结果在 `.local/submission-timing-20260915.json`。
-
-## 国福路足球场预约
-
-使用项目内的 uv 环境（Python 3.12），浏览器依赖由 npm 锁文件固定：
-
-```powershell
+git clone https://github.com/fdusjtu/fudan-guofu-soccer-reservation.git
+cd fudan-guofu-soccer-reservation
 uv sync --locked
 npm ci --ignore-scripts --no-audit --no-fund
+
+New-Item -ItemType Directory -Force .local | Out-Null
+if (!(Test-Path .local/credentials.env)) {
+    Copy-Item credentials.example.env .local/credentials.env
+}
+notepad .local/credentials.env
+```
+
+填写三个值，保存后关闭编辑器：
+
+```dotenv
+FUDAN_USER=你的UIS账号
+FUDAN_PASSWORD=你的UIS密码
+FUDAN_PHONE=你的手机号
+```
+
+程序自动读取 `.local/credentials.env`；同名环境变量优先。真实凭据、浏览器会话和日志位于被 Git 忽略的 `.local/`，仓库只提供空白模板。不要把真实信息填进 `credentials.example.env`，也不要强制提交本地凭据和会话。
+
+首次使用建议先检查登录，**此命令不创建预约**：
+
+```powershell
+uv run --locked python -m automations.soccer --check --log-file .local/soccer-login-check.log
+```
+
+检查仍需要登录并访问学校平台，额外认证可能需要人工完成。检查结束后默认保留浏览器，回到终端按 Enter 关闭。
+
+## 启动预约
+
+```powershell
+# 默认两个时段
 uv run --locked python -m automations.soccer
+
+# 只预约 18:00–19:00
+uv run --locked python -m automations.soccer --slots 1
+
+# 只预约 19:00–20:00
+uv run --locked python -m automations.soccer --slots 2
+
+# 显式指定两个时段
+uv run --locked python -m automations.soccer --slots 1 2
 ```
 
-默认预约 18:00–19:00 和 19:00–20:00 两个时段；指定时段时使用编号：
+编号代表时间段，不代表两个固定实体场地；每笔请求只预约一个时段，由平台分配子场地。正式启动可能立即预约现有空位。
+
+保持终端打开、电脑不休眠、网络可用，并同步系统时间。正常运行不会因为本轮成功、部分成功或核实结果不确定而退出。按 **Ctrl+C** 停止自动预约；默认随后保留浏览器等待人工处理，按 Enter 或再次 Ctrl+C 关闭。若需停止时直接关闭浏览器：
 
 ```powershell
-uv run --locked python -m automations.soccer --slots 1       # 18:00–19:00
-uv run --locked python -m automations.soccer --slots 2       # 19:00–20:00
-uv run --locked python -m automations.soccer --slots 1 2    # 两个时段
+uv run --locked python -m automations.soccer --close-browser
 ```
 
-正式运行会持续等待下一次放号，不会因为提前预约成功或本轮结果不确定而退出；按 Ctrl+C 停止。停止后默认保留 Chrome 窗口，方便人工完成验证码、确认或查看结果，按 Enter 关闭；需要停止后直接关闭时加 `--close-browser`。
+一次只运行一个足球预约进程。修改代码或配置后需停止旧进程并重新启动。
 
-实际路径为 Python → 常驻 Node Playwright → 本机 Chrome → 页面内 fetch。
-Chrome 使用独立配置 `.local/soccer-chrome`，会话保存在该目录；无需另外下载浏览器。
-复制 `credentials.example.env` 为 `.local/credentials.env`，填写 `FUDAN_USER`、`FUDAN_PASSWORD`、`FUDAN_PHONE`；环境变量优先。`.local/` 和本地凭据文件已被 `.gitignore` 忽略，推送 GitHub 时只会提交示例文件；不要用 `git add -f` 强行加入真实凭据。
+## 每天如何预约
 
-### 业务与时间
+时间均为北京时间，调度依赖本机时钟。早上放号目标为 **放号日 +2 天**：例如 9 月 17 日早上预约 9 月 19 日。
 
-- 默认预约两个时段：18–19、19–20 点。这里的编号对应时段，不是两个固定实体场地；每笔请求由系统分配子场地。可用 `--slots 1` 或 `--slots 2` 指定单个时段。早上放号目标是放号日 +2 天。
-- 启动先登录，扫描今天至今天 +2 天的日历（当前规则允许的范围），只尝试明确可预约且剩余量大于零的时段；跳过已经开始和本人已有有效预约的时段。所有有空位的日期都按日期顺序尝试，每个日期开始前重查余量。
-- 启动预约每个日期只做一轮单时段提交，也不超过目标时段开始时间；临近早上准备/放号时让出时间。只提交该日期查到空位的目标时段，随后做一次有限核实。扫描是启动时的一次检查，不是整夜监控退订空位。
-- 启动先做一次当前已开放空位扫描；扫描中即使已经预约成功，也不会结束进程，仍会进入本轮正式放号窗口。启动较早时先在 06:55–06:57 准备，07:00 才开始提交，避免提前请求拖慢整点提交。
-- 每个 07:00–07:05 窗口结束后继续等待下一天：在下一次 07:00 前重新确定“放号日 +2 天”的目标日期，06:55 检查会话、06:57 完成日历和本人预约读取，07:00 进入提交。已经预约的时段自动跳过，成功、部分成功和结果不确定都不会让常驻进程退出。查询失败会恢复重试，不当作“无空位”。
-- 等待放号时，06:55 检查已登录会话，06:57 做用户信息、规则、日历和本人预约检查；会话失效才恢复登录。健康会话不在 06:59 重新导航登录。
-- 准备完成后，整点前每 15 秒查询本人预约检查会话；发现失效提前恢复。日志记录实际准备完成时间及距整点的秒数；迟启动或故障不保证能在 06:57 就绪。
-- 正式放号首次提交从本地 07:00 后延 100ms 开始。两个时段共用一个账号级提交队列：同一时间只允许一笔在途，距上次实际发起至少 2 秒；新增提交仅限起点后的 120 秒，每个时段最多 60 次，并满足服务端退避要求后才能重试。不再按固定轮次跳过发送机会。
-- 繁忙、5xx 和“点击太频繁了”在次数上限内按账号级间隔重试；429、防护响应、已有待处理预约和权限/表单/冲突类拒绝会暂停全部或对应时段。普通请求超时、已受理但未见记录时先核实，不立即叠加 POST。
-- 放号前按不超过 15 秒间隔检查会话；放号后仅在提交返回 OK 或出现不确定网络结果时唤醒核实，最多核实 6 轮。核实请求不重叠，仍未查到时记录“结果不确定”并停止该时段，避免无限提交。
-- 提交阶段浏览器断开或登录失效最多恢复 3 次；准备阶段连续失败达到 3 次也会停止。403/412、防护 HTML 和 429 不再当作登录失效循环恢复。恢复登录并复查规则后，结果不明的已发请求仍先进行有限核实，查不到不自动重发；尚未提交的目标可继续。
-- 早上放号新增预约受 120 秒提交窗口约束，恢复和有限核实最晚到 07:05；启动空位预约使用该次尝试的截止时间。浏览器在调用 fetch 前再次校验时间窗口；已经发出的请求不能保证在服务器停止处理，窗口结束后还会等待在途请求并最终核实。
-- `anti_bot=0` 不取验证码；需要滑块时在后台补充，一张凭据只用一次。整点前 10 秒开始预取，最多保留 2 张、超过 10 秒的本地缓存保守丢弃（不代表已证明服务端有效期为 10 秒）。池空跳过当前发送机会，不让图像求解阻塞调度；恢复浏览器后作废旧池。短信/额外认证仍可能需要人工处理。
+| 阶段 | 行为 |
+| --- | --- |
+| 启动时 | 扫描今天至今天 +2 天的已开放空位；按日期尝试所选时段，跳过已开始或本人已有有效预约的时段。 |
+| 放号前 | 提前确定目标日期；06:55 检查会话，06:57 再读取规则、日历和已有预约。会话失效时尝试恢复。 |
+| 07:00:00.100–07:02:00.100 | 正式新增提交窗口，默认 120 秒。两个时段共用串行队列，失败按规则重试。 |
+| 提交后 | 查询本人预约核实结果；恢复与核实循环的截止时间为 07:05，在途请求及最终收尾可能延后结束。 |
+| 本轮完成后 | 保留浏览器和会话，等待下一天 06:55 准备下一轮。 |
 
-### 检查、日志与测试
+启动空位扫描只执行一次，不会整夜监控退订。每个候选日期开始前重查余量，启动扫描每个目标时段只尝试提交一次，随后有限核实；临近放号时受截止时间限制。迟启动、登录异常或网络故障会影响整点就绪。
+
+### 两个时段的提交顺序
+
+同一账号最多只有一笔预约请求在途。第二笔需同时满足：**第一笔已经返回**，且**距离第一笔发起至少 2 秒**。
+
+例如第一笔在 07:00:00.100 发出、07:00:05 才返回，第二笔可紧接着发送，不额外等待 2 秒。尚未尝试的时段优先于已经失败时段的重试。
+
+### 重试与结果核实
+
+- 每个时段每轮最多提交 **60 次**，首次计入上限；**120 秒**窗口与次数上限哪个先达到，就停止新增提交。两个时段共用队列，不保证各提交 60 次。
+- 系统繁忙、5xx 和“点击太频繁了”可在限制内重试，并遵循服务端退避时间。
+- 已确认成功的时段停止提交。已受理或网络超时导致结果不明时，先查询本人预约，不立即重复提交；有限核实后仍未找到记录则报告“结果不确定”。
+- 429、访问防护、权限限制、冲突或已有待处理预约等情况会暂停相关目标或本轮请求；准备阶段连续恢复失败等致命错误会停止程序并默认保留浏览器。
+- 登录失效或浏览器断开时有限恢复。短信或其他额外认证可能需要人工处理。保留浏览器不意味着页面一定停在每笔请求的确认画面。
+
+预约结果以平台实际记录为准；本地测试不能保证真实放号时必然预约成功。
+
+## 调整参数
+
+编辑 [automations/soccer.py](automations/soccer.py) 顶部参数后重启程序：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| RETRY_WINDOW_SECONDS | 120 | 正式放号新增提交窗口，单位秒。 |
+| MAX_SUBMISSION_ATTEMPTS | 60 | 每个时段每轮最多提交次数，包含首次。 |
+| SUBMIT_INTERVAL_SECONDS | 2.0 | 账号两次请求发起之间的最短间隔，仍需等待上一笔返回。 |
+| OPENING_GUARD_MS | 100 | 本地 07:00 后延迟 100 毫秒开始提交。 |
+| MAX_VERIFICATION_ATTEMPTS | 6 | 有限核实的轮数上限。 |
+| MAX_RECOVERY_ATTEMPTS | 3 | 恢复尝试上限。 |
+
+## 日志与排查
+
+- 默认日志为 `.local/soccer.log`，**每次重新启动会覆盖**，连续运行跨天不会重新清空。需留档时先复制日志，或通过 `--log-file` 指定新路径。
+- 独立浏览器配置目录为 `.local/soccer-chrome`，保存登录状态。
+- 日志中的 `fetch_timing` 记录页面调用 fetch 的时间和响应耗时，并非服务器收到请求的时间。
+- 无法进入页面时，先运行 `--check` 并查看终端和检查日志。配置项非空不代表密码正确或会话有效。
+- 当前路径为 Python → Node Playwright → 本机浏览器 → 页面内请求；`--transport http` 保留作对照，不能继承浏览器动态会话。
+
+持续五分钟检查会话、不提交预约：
 
 ```powershell
-# 只读；桥接层禁止非 GET 请求，不提交预约或验证码校验。
-uv run --locked python -m automations.soccer --check --watch-seconds 300 --log-file .local\soccer-latest-check.log
+uv run --locked python -m automations.soccer --check --watch-seconds 300 --log-file .local/soccer-check.log
+```
 
-# 本地测试，不创建学校预约。
+## 代码结构与测试
+
+```text
+automations/soccer.py             预约调度、重试、核实与跨天循环
+fudan_spider/apis/soccer_api.py   足球预约平台接口
+fudan_spider/uis.py               UIS 登录响应解析
+fudan_spider/utils.py             配置读取与会话文件保存
+soccer_browser.py                Python 浏览器桥接
+soccer_browser.cjs               浏览器启动、登录与页面请求
+captcha_slide.py                 滑块处理
+credentials.example.env         空白凭据模板
+tests/                          模拟接口和本地浏览器测试
+```
+
+以下测试不创建学校预约。浏览器测试会调用本机浏览器和本地模拟服务：
+
+```powershell
 uv run --locked python -B tests/test_soccer.py
-uv run --locked python -B tests/test_soccer_browser.py
 uv run --locked python -B tests/test_soccer_retry.py
-
-# 本机 HTTP 模拟服务 + 真 Chrome，测量 20 秒调度抖动；不会向学校压测。
-uv run --locked python -B tests/test_soccer_browser.py --benchmark
+uv run --locked python -B tests/test_soccer_browser.py
 ```
 
-- 默认每次运行重写 `.local/soccer.log`。先取得单实例锁再打开日志，拒绝第二个实例不会清空正在运行的日志。
-- `fetch_timing` 记录计划时间、页面调用 fetch 的时间和响应耗时。页面调用时间不等于数据上网线或学校服务器收到的时间。
-- `.local/soccer-chrome/.soccer-owner.json` 仅用于核对本脚本遗留的浏览器进程；清理须匹配 PID、启动时间、可执行文件、完整配置参数及调试端口，不按目录前缀批量关闭 Chrome。
-- `--transport http` 保留作对照；它不能继承 Chrome 动态会话。`--browser-profile` 可指定独立配置目录。
-- 2026-09-16 检查 Windows 时间服务报告未同步，`w32tm /resync` 返回拒绝访问。需在 Windows“日期和时间”设置中完成同步；本地节拍测试不能证明本机整点与服务器时间一致。
-- 保持电脑唤醒和网络可用；当前脚本只运行一个窗口，不自动配置每日任务。
+## 版本
+
+- **v1.0.0**：首次保留的基线。
+- **v1.1.0**：独立本地凭据、时段选择、串行提交、结果核实修正、跨天常驻及两分钟提交窗口。
+- **v1.2.0**：足球场专用版本，移除讨论室预约入口、接口、测试及专用解析函数，整理公开仓库使用说明。

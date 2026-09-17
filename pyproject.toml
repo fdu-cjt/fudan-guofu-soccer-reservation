@@ -1,7 +1,7 @@
 [project]
 name = "fudan-reserve"
-version = "0.1.0"
-description = "复旦场地自动预约：讨论室（lims.fudan.edu.cn）与国福路足球场（booking.fudan.edu.cn）"
+version = "1.2.0"
+description = "复旦大学国福路足球场预约"
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.32",
