@@ -736,6 +736,17 @@ def watch_access(client, day, seconds):
         raise RuntimeError(f"持续访问检查中有 {failures} 次失败，尚不能认为会话稳定。")
 
 
+def hold_browser(close_browser=False):
+    """Keep the visible Chrome page available for manual follow-up."""
+    if close_browser:
+        return
+    log("预约流程已结束，浏览器窗口保留；完成验证码或确认操作后按 Enter 关闭浏览器。")
+    try:
+        input("按 Enter 关闭浏览器（Ctrl+C 也会关闭）：")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="立即验证登录、表单和时段，不提交。")
@@ -745,6 +756,8 @@ def main():
     parser.add_argument("--slots", "--slot", "--periods", dest="slot_numbers", nargs="+", type=int,
                         choices=(1, 2), metavar="N",
                         help="预约时段：1=18:00-19:00，2=19:00-20:00；默认两个都预约。")
+    parser.add_argument("--close-browser", action="store_true",
+                        help="预约结束后直接关闭 Chrome；默认保留窗口等待手动处理。")
     parser.add_argument("--watch-seconds", type=float, default=0, help="仅用于 --check：每 15 秒并行检查四个只读接口。")
     parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_PATH, help="日志文件路径（每次运行重写）。")
     args = parser.parse_args()
@@ -763,13 +776,12 @@ def run(args):
         load_credentials()
         slot_numbers = getattr(args, "slot_numbers", None)
         if not isinstance(slot_numbers, (list, tuple, set)):
-            slot_numbers = None
+            slot_numbers = {1, 2}
         else:
             slot_numbers = set(slot_numbers)
-        if slot_numbers:
-            log("指定预约时段：" + ", ".join(
-                f"{number}（{('18:00-19:00' if number == 1 else '19:00-20:00')}）"
-                for number in sorted(slot_numbers)))
+        log("预约时段：" + ", ".join(
+            f"{number}（{('18:00-19:00' if number == 1 else '19:00-20:00')}）"
+            for number in sorted(slot_numbers)))
         preview = args.check or args.dry_run
         opening, deadline = next_window(now())
         startup = not preview and now() < opening
@@ -833,7 +845,8 @@ def run(args):
                 time.sleep(min(RECOVERY_RETRY_SECONDS, max(0, (deadline-now()).total_seconds())))
         if not prepared:
             raise RuntimeError("准备阶段未能恢复登录或完成规则检查，已到本次截止时间。")
-        target_periods = selected_period_ids(calendar, slot_numbers)
+        target_periods = (selected_period_ids(calendar, slot_numbers)
+                          if isinstance(calendar, dict) else None)
         audit("preparation", stage="ready", seconds_before_opening=round((opening-now()).total_seconds(), 3))
         dispatch_opening = (opening + timedelta(milliseconds=OPENING_GUARD_MS)
                             if not preview else None)
@@ -848,6 +861,7 @@ def run(args):
         if client is not None:
             client.http.close()
         if browser is not None:
+            hold_browser(close_browser=getattr(args, "close_browser", False) is True)
             browser.close()
         audit("log_file", path=str(LOG_PATH), status="ok" if LOG_STREAM is not None else "unavailable",
               reason=LOG_REASON or None, events=len(RUN_EVENTS))

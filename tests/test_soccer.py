@@ -262,6 +262,15 @@ def test_second_instance_keeps_log():
         assert target.read_text(encoding='utf-8') == 'KEEP_EXISTING_LOG'
 
 
+def test_browser_hold():
+    with patch('builtins.input', return_value='') as prompt, patch.object(r, 'log'):
+        r.hold_browser()
+        prompt.assert_called_once()
+    with patch('builtins.input') as prompt:
+        r.hold_browser(close_browser=True)
+        prompt.assert_not_called()
+
+
 def test_early_preparation():
     clock = [datetime(2026, 9, 17, 6, 54, tzinfo=r.SHANGHAI)]
     waits = []
@@ -390,6 +399,7 @@ def check():
     test_parallel_dispatch()
     test_recovery_and_ok_wakeup()
     test_second_instance_keeps_log()
+    test_browser_hold()
     test_early_preparation()
     test_startup_availability()
 
