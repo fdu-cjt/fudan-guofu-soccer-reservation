@@ -38,9 +38,9 @@ uv run --locked python -m automations.soccer --check
 uv run --locked python -m automations.soccer
 
 # 只预约一个时段：1 = 18–19 点，2 = 19–20 点
-uv run --locked python -m automations.soccer --slots 1
+uv run --locked python -m automations.soccer --time 1
 ```
 
 启动后先尝试已有空位，再每天早上 07:00–07:02 尝试预约放号日后两天的场地。
 
-运行日志写入 `logs/soccer.log`。
+运行日志按日期追加写入 `logs/soccer-YYYY-MM-DD.log`。

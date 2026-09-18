@@ -67,13 +67,15 @@ def log(message):
 
 
 def setup_logging(path=None):
-    """每次运行重写日志文件，并返回 (路径, 失败原因)。原因非空表示只剩终端输出。"""
+    """按日期保留日志；显式路径也追加写入，并返回 (路径, 失败原因)。"""
     global LOG_PATH, LOG_STREAM, LOG_REASON
-    candidate = Path(path) if path else DEFAULT_LOG_PATH
+    candidate = Path(path) if path else Path(DEFAULT_LOG_PATH).with_name(
+        f"{Path(DEFAULT_LOG_PATH).stem}-{now():%Y-%m-%d}{Path(DEFAULT_LOG_PATH).suffix}"
+    )
     LOG_PATH, LOG_STREAM, LOG_REASON = candidate, None, ""
     try:
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        LOG_STREAM = candidate.open("w", encoding="utf-8")
+        LOG_STREAM = candidate.open("a", encoding="utf-8")
     except OSError as exc:
         LOG_STREAM, LOG_REASON = None, f"{type(exc).__name__}: {exc}"
     return LOG_PATH, LOG_REASON
@@ -254,9 +256,10 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
     attempts, generation, recovery_attempts = 0, 0, 0
     attempts_by_target = {period["id"]: 0 for period in periods}
     in_flight, awaiting_verification = set(), set()
-    # All periods share one account-level submission cadence. The platform may
-    # rate-limit the account even when the two periods use different payloads.
+    # All periods share one account-level submission cadence. Different periods
+    # may overlap in flight, but the next POST starts at least 2s later.
     last_submit_at, retry_after = -float("inf"), {}
+    submit_gate, next_submit_at = threading.Lock(), -float("inf")
     pool = queue.Queue(maxsize=CAPTCHA_POOL_SIZE)
     if isinstance(client.http, BrowserSession):
         client.http.window = (opening.timestamp()*1000, submission_deadline.timestamp()*1000)
@@ -411,11 +414,11 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     stop.wait(.2)
 
     local = threading.local()
-    # One account-level submission worker; verification remains independent.
-    executor = ThreadPoolExecutor(max_workers=1)
+    # One worker per selected period; the account-level cadence still spaces starts.
+    executor = ThreadPoolExecutor(max_workers=max(1, len(periods)))
 
     def submit(target, payload, planned_at):
-        nonlocal last_submit_at
+        nonlocal next_submit_at
         epoch = generation
         try:
             if stop.is_set() or not ready.is_set() or now() >= submission_deadline:
@@ -424,10 +427,15 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 local.client = client.fork()
                 with lock:
                     workers.append(local.client)
-            if isinstance(local.client.http, BrowserSession):
-                local.client.http.planned_at = planned_at
-            with lock:
-                last_submit_at = time.monotonic()
+            with submit_gate:
+                delay = next_submit_at - time.monotonic()
+                if delay > 0:
+                    stop.wait(min(delay, max(0, (deadline-now()).total_seconds())))
+                if stop.is_set() or now() >= submission_deadline:
+                    return
+                if isinstance(local.client.http, BrowserSession):
+                    local.client.http.planned_at = planned_at
+                next_submit_at = time.monotonic() + SUBMIT_INTERVAL_SECONDS
             response = local.client.submit(payload)
             if not isinstance(response, dict) or "e" not in response:
                 raise ValueError("预约响应结构错误")
@@ -574,7 +582,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 with lock:
                     target = period["id"]
                     current_mono = time.monotonic()
-                    if (in_flight or target in confirmed or target in halted
+                    if (target in in_flight or target in confirmed or target in halted
                             or target in awaiting_verification):
                         continue
                     if now() >= submission_deadline or attempts_by_target[target] >= attempt_limit:
@@ -609,6 +617,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                         maybe_stop_locked()
                         continue
                     in_flight.add(target)
+                    last_submit_at = current_mono
                     attempts += 1
                     attempts_by_target[target] += 1
                     audit("submit", attempts=attempts, target_attempt=attempts_by_target[target],
@@ -744,13 +753,14 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="与 --check 相同。")
     parser.add_argument("--transport", choices=("browser", "http"), default="browser", help="默认使用本机 Chrome；http 保留用于对照。")
     parser.add_argument("--browser-profile", type=Path, default=LOCAL / "soccer-chrome", help="独立 Chrome 配置目录，用于保留登录状态。")
-    parser.add_argument("--slots", "--slot", "--periods", dest="slot_numbers", nargs="+", type=int,
+    parser.add_argument("--time", dest="slot_numbers", nargs="+", type=int,
                         choices=(1, 2), metavar="N",
                         help="预约时段：1=18:00-19:00，2=19:00-20:00；默认两个都预约。")
     parser.add_argument("--close-browser", action="store_true",
                         help="停止程序后直接关闭 Chrome；默认保留窗口等待手动处理。")
     parser.add_argument("--watch-seconds", type=float, default=0, help="仅用于 --check：每 15 秒并行检查四个只读接口。")
-    parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_PATH, help="日志文件路径（每次运行重写）。")
+    parser.add_argument("--log-file", type=Path, default=None,
+                        help="日志文件路径；默认按日期写入 logs/soccer-YYYY-MM-DD.log。")
     args = parser.parse_args()
     if not math.isfinite(args.watch_seconds) or args.watch_seconds < 0 or (args.watch_seconds and not (args.check or args.dry_run)):
         parser.error("--watch-seconds 必须非负且与 --check/--dry-run 一起使用。")
@@ -761,7 +771,7 @@ def main():
 
 def run(args, continuous=True):
     path, reason = setup_logging(args.log_file)
-    log(f"日志文件：{path}" + (f"（不可写：{reason}）" if reason else "（本次运行重写）"))
+    log(f"日志文件：{path}" + (f"（不可写：{reason}）" if reason else "（追加写入）"))
     client, browser = None, None
     try:
         load_credentials()
