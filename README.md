@@ -45,4 +45,3 @@ uv run --locked python -m automations.soccer --time 1
 
 默认两个时段共用一个账号级提交队列，正常提交至少间隔 2 秒。所有提交结果最多核实本人预约 3 轮；请求超时且核实不到时，同一时段最多额外重发 1 次，仍不确定就停止该时段，避免无限重复提交。
 
-运行日志按日期追加写入 `logs/soccer-YYYY-MM-DD.log`。
