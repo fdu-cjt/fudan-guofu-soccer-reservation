@@ -147,7 +147,7 @@ def test_request_policy(tmp):
 
 
 def test_parallel_dispatch():
-    """同一账号的两个时段串行提交，并共享最小提交间隔。"""
+    """同一账号的两个时段至少间隔提交，但不被慢请求串行阻塞。"""
     day = date(2026, 9, 17)
     calendar = json.loads((Path(__file__).parent / 'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     client, verifier = Mock(), Mock()
@@ -161,7 +161,7 @@ def test_parallel_dispatch():
         assert len(periods) == 1
         with guard:
             calls.append((periods[0]['period_id'], time.monotonic(), r.now()))
-        time.sleep(.04)
+        time.sleep(.35)
         with guard:
             ends.append(time.monotonic())
         return {'e': 'ERROR', 'm': '系统繁忙，请稍后再试'}
@@ -178,7 +178,7 @@ def test_parallel_dispatch():
     assert len(calls) >= 2, calls
     assert {p for p, _, _ in calls[:2]} == {3892, 3893}
     assert .18 <= calls[1][1] - calls[0][1], calls
-    assert calls[1][1] >= ends[0], '账号级提交不能重叠在途请求'
+    assert calls[1][1] < ends[0], '第二个时段不应等待第一个慢请求结束'
     assert all(opening <= t < deadline for _, _, t in calls), calls
     assert all(w.http.close.called for w in workers) and verifier.http.close.called
     assert verifier.mine.call_count == 1, verifier.mine.call_count
