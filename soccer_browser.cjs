@@ -40,9 +40,20 @@ function freePort() {
 }
 
 async function waitForDebugger(port, deadline) {
+  let launcherExitedAt = null;
   while (Date.now() < deadline) {
-    if (closing || chromeProcess?.exitCode !== null || chromeProcess?.spawnFailure)
-      throw new Error('Chrome stopped before debugger became ready');
+    if (closing) throw new Error('Browser is closing');
+    if (chromeProcess?.spawnFailure)
+      throw new Error('Browser failed to start: ' + chromeProcess.spawnFailure.message);
+    if (chromeProcess && chromeProcess.exitCode !== null && launcherExitedAt === null) {
+      launcherExitedAt = Date.now();
+      progress({ stage: 'browser_launcher_exited', code: chromeProcess.exitCode });
+    }
+    // Chromium may forward this launch to an existing process for the same
+    // profile and let the new launcher exit. Keep probing the requested port
+    // briefly instead of treating that normal handoff as an immediate failure.
+    if (launcherExitedAt !== null && Date.now() - launcherExitedAt >= 15000)
+      throw new Error('Browser launcher exited before its debugger became ready');
     try {
       const response = await fetch('http://127.0.0.1:' + port + '/json/version',
         { signal: AbortSignal.timeout(Math.max(1, Math.min(1000, deadline - Date.now()))) });
@@ -50,7 +61,7 @@ async function waitForDebugger(port, deadline) {
     } catch {}
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  throw new Error('Chrome 调试端口未就绪；该配置目录可能已被另一个 Chrome 进程占用');
+  throw new Error('Browser 调试端口未就绪；该配置目录可能已被另一个浏览器进程占用');
 }
 
 let chromeProcess = null;
@@ -77,29 +88,18 @@ function killChromeTree() {
 
 // 上一次运行崩溃后可能留下占着同一配置目录的 Chrome，回收它以自愈。
 function killStaleForProfile(profile) {
-  const ownerPath = path.join(profile, '.soccer-owner.json');
-  if (!fs.existsSync(ownerPath)) return Promise.resolve();
-  let owner;
-  try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); }
-  catch { return Promise.resolve(); }
-  if (owner.profile !== profile) return Promise.resolve();
-  // Only our recorded PID, executable, creation time, exact profile argument and port.
-  // A similarly named profile or an ordinary user's Chrome must never be terminated.
+  // The owner record can be stale or overwritten after a failed launch. The
+  // dedicated profile is the reliable boundary: never touch a browser that
+  // does not carry this exact --user-data-dir argument.
   const script = `
-    $owner = $env:SOCCER_OWNER_RECORD | ConvertFrom-Json
-    $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$owner.pid)
-    $escaped = [regex]::Escape([string]$owner.profile)
+    $escaped = [regex]::Escape([string]$env:SOCCER_PROFILE)
     $pattern = '(?:^|\\s)(?:"--user-data-dir=' + $escaped + '"|--user-data-dir="' + $escaped + '"|--user-data-dir=' + $escaped + ')(?=\\s|$)'
-    $portPattern = '(?:^|\\s)--remote-debugging-port=' + [int]$owner.port + '(?=\\s|$)'
-    if ($p -and $p.ExecutablePath -ieq $owner.executable -and $p.CommandLine -match $pattern -and $p.CommandLine -match $portPattern) {
-      $created = ([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds()
-      if ([math]::Abs($created - [long]$owner.startedMs) -lt 10000) {
-        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-      }
-    }`;
+    Get-CimInstance Win32_Process |
+      Where-Object { $_.Name -in @('chrome.exe', 'msedge.exe') -and $_.CommandLine -and $_.CommandLine -match $pattern } |
+      ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }`;
   return withTimeout(new Promise(resolve => {
     const killer = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { stdio: 'ignore', windowsHide: true, env: { ...process.env, SOCCER_OWNER_RECORD: JSON.stringify(owner) } });
+      { stdio: 'ignore', windowsHide: true, env: { ...process.env, SOCCER_PROFILE: profile } });
     killer.on('exit', resolve);
     killer.on('error', resolve);
   }), 5000);
@@ -134,6 +134,7 @@ async function launchChrome(profile, deadline) {
     info = await waitForDebugger(port, deadline);
   } catch (error) {
     await killChromeTree();
+    await killStaleForProfile(profile);
     throw error;
   }
   if (closing) throw new Error('Browser is closing');
