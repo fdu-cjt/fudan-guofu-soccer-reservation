@@ -18,6 +18,16 @@ from automations import soccer as r
 REAL_LOG = r.log          # 测试里多数场景会 patch 掉 log()，日志专项测试需要真的那个
 
 
+def test_git_version():
+    for status, dirty in [('## main...origin/main\n', False),
+                          ('## concurrent-test\n M automations/soccer.py\n', True)]:
+        with patch('fudan_spider.utils.subprocess.check_output', side_effect=['abc123\n', status]):
+            assert r.git_version() == {'branch': status.splitlines()[0][3:].split('...')[0],
+                                       'commit': 'abc123', 'dirty': dirty}
+    with patch('fudan_spider.utils.subprocess.check_output', side_effect=FileNotFoundError):
+        assert r.git_version() == {'branch': 'unknown', 'commit': 'unknown', 'dirty': None}
+
+
 def test_credentials(tmp):
     """凭据优先级：.env 文件 < 环境变量；缺失时报错而不是静默用兜底值。"""
     original = r.USER, r.PASSWORD, r.PHONE
@@ -465,6 +475,7 @@ def test_daily_report():
 
 
 def check():
+    test_git_version()
     day = date(2026,9,17)
     begin = datetime(2026,9,15,7,tzinfo=r.SHANGHAI)
     assert r.next_window(begin)[0] == begin

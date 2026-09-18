@@ -30,6 +30,10 @@ FUDAN_PHONE=你的手机号
 
 ## uv 启动
 
+`main` 用于发布，`concurrent-test` 用于预约实验。运行前可用 `git status --short --branch` 确认当前分支；下面的命令始终执行当前工作区代码。
+
+每次启动会在日志中记录 `runtime_version`，包含分支、提交编号和是否有未提交修改；无需手动记住提交编号。缺少 Git 时记录为 `unknown`，不影响程序运行。
+
 ```powershell
 # 检查登录，不提交预约
 uv run --locked python -m automations.soccer --check

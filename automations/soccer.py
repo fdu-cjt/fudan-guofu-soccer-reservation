@@ -24,7 +24,7 @@ from fudan_spider.apis.soccer_api import (
     AccessBlocked, Client as _SoccerClient, SessionExpired, TransientError,
     calendar_periods, make_payload, own_slot, slide_solver,
 )
-from fudan_spider.utils import SHANGHAI, load_env_file
+from fudan_spider.utils import SHANGHAI, git_version, load_env_file
 
 CAPTCHA_POOL_SIZE = 2
 SUBMIT_INTERVAL_SECONDS = 2.0
@@ -810,6 +810,7 @@ def run(args, continuous=True):
     log(f"日志文件：{path}" + (f"（不可写：{reason}）" if reason else "（追加写入）"))
     client, browser = None, None
     try:
+        audit("runtime_version", **git_version())
         load_credentials()
         slot_numbers = getattr(args, "slot_numbers", None)
         if not isinstance(slot_numbers, (list, tuple, set)):

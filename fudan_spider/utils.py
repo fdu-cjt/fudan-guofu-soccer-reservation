@@ -1,10 +1,25 @@
 """Small utilities shared by the reservation clients."""
 import json
 import os
+import subprocess
 from datetime import timedelta, timezone
 from pathlib import Path
 
 SHANGHAI = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+
+def git_version():
+    """Identify the code being run without exposing changed filenames or requiring Git."""
+    options = dict(cwd=Path(__file__).resolve().parents[1], text=True, encoding="utf-8",
+                   stderr=subprocess.DEVNULL, timeout=3,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], **options).strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain=v1", "--branch", "--untracked-files=normal"], **options).splitlines()
+        return {"branch": status[0][3:].split("...")[0], "commit": commit, "dirty": len(status) > 1}
+    except (OSError, subprocess.SubprocessError, IndexError, UnicodeError):
+        return {"branch": "unknown", "commit": "unknown", "dirty": None}
 
 
 def save_json(path, value):
