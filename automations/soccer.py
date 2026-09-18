@@ -31,6 +31,7 @@ SUBMIT_INTERVAL_SECONDS = 2.0
 RETRY_WINDOW_SECONDS = 120
 MAX_SUBMISSION_ATTEMPTS = 60
 MAX_VERIFICATION_ATTEMPTS = 6
+TIMEOUT_VERIFICATION_ATTEMPTS = 3
 TIMEOUT_RETRY_LIMIT = 1
 MAX_RECOVERY_ATTEMPTS = 3
 VERIFY_INTERVAL_SECONDS = 0.5
@@ -376,7 +377,10 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     with lock:
                         for target in pending:
                             verification_rounds[target] = verification_rounds.get(target, 0) + 1
-                            if verification_rounds[target] >= MAX_VERIFICATION_ATTEMPTS:
+                            verification_limit = (TIMEOUT_VERIFICATION_ATTEMPTS
+                                                   if target in timeout_targets
+                                                   else MAX_VERIFICATION_ATTEMPTS)
+                            if verification_rounds[target] >= verification_limit:
                                 awaiting_verification.discard(target)
                                 if (target in timeout_targets
                                         and timeout_retry_counts.get(target, 0) < TIMEOUT_RETRY_LIMIT
