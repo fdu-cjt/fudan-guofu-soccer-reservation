@@ -400,13 +400,10 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                                     timeout_targets.discard(target)
                                     timeout_retry_counts[target] = timeout_retry_counts.get(target, 0) + 1
                                     verification_rounds[target] = 0
-                                    retry_after[target] = max(
-                                        retry_after.get(target, 0),
-                                        time.monotonic() + SUBMIT_INTERVAL_SECONDS,
-                                    )
+                                    # The shared dispatch gate already enforces the account interval.
                                     audit("timeout_retry", targets=[target],
                                           attempt=timeout_retry_counts[target],
-                                          delay=SUBMIT_INTERVAL_SECONDS)
+                                          extra_delay=0)
                                 else:
                                     halted[target] = "核实超时，结果不确定"
                                     uncertain.add(target)

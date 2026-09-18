@@ -413,6 +413,43 @@ def test_continuous_windows():
     client.http.close.assert_called_once()
 
 
+def test_timeout_retry_cadence():
+    """核实后不额外退避；另一时段最近的提交仍约束补发时间。"""
+    calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
+    day = date(2026, 9, 17)
+    for targets in ({3892}, {3892, 3893}):
+        client, verifier = Mock(), Mock()
+        calls, records, verified_at = [], [], []
+
+        def audit(event, **fields):
+            if event == 'timeout_retry':
+                verified_at.append(time.monotonic())
+
+        def submit(payload):
+            target = json.loads(payload['data'])[0]['period'][0]['period_id']
+            calls.append((target, time.monotonic()))
+            if len(calls) == 1:
+                time.sleep(.35 if len(targets) == 1 else .01)
+                raise requests.Timeout('response lost')
+            records.append({'id': target, 'group_id': 1029, 'status': 3,
+                            'detail': {str(day): [{'period_id': target, 'is_cancel': 0}]}})
+            return {'e': 'OK'}
+
+        client.mine.side_effect = verifier.mine.side_effect = lambda: copy.deepcopy(records)
+        client.fork.side_effect = lambda: Mock(submit=Mock(side_effect=submit))
+        with patch.object(r, 'log'), patch.object(r, 'audit', side_effect=audit), \
+             patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .3), \
+             patch.object(r, 'VERIFY_INTERVAL_SECONDS', .015 if len(targets) == 1 else .12):
+            result = r.poll(client, day, r.now()+r.timedelta(seconds=2), calendar=calendar, own=[],
+                            target_periods=targets, verifier_factory=lambda c: verifier)
+        assert set(result) == targets and len(verified_at) == 1, (targets, result, calls)
+        assert all(b[1]-a[1] >= .29 for a, b in zip(calls, calls[1:])), calls
+        if len(targets) == 1:
+            assert len(calls) == 2 and 0 <= calls[1][1]-verified_at[0] < .15, calls
+        else:
+            assert [target for target, _ in calls] == [3892, 3893, 3892], calls
+
+
 def test_daily_report():
     calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     day = date(2026, 9, 17)
@@ -466,6 +503,7 @@ def check():
     test_early_preparation()
     test_startup_availability()
     test_continuous_windows()
+    test_timeout_retry_cadence()
     test_daily_report()
 
     with TemporaryDirectory() as tmp, patch.object(r, 'LOCAL', Path(tmp)), \
