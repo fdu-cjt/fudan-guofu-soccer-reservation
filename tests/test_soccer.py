@@ -506,7 +506,7 @@ def check():
                 with call_lock:
                     calls.append(payload)
                     attempt = len(calls)
-                if kind == 'timeout' and attempt == 1:
+                if kind == 'timeout_always' or (kind == 'timeout' and attempt == 1):
                     raise requests.Timeout()
                 if kind == 'server_error':
                     raise r.TransientError('HTTP 503')
@@ -562,8 +562,11 @@ def check():
         for kind in ('normal', 'timeout', 'concurrent', 'captcha', 'quota', 'unconfirmed'):
             calls, result = run(kind)
             assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS, (kind, len(calls))
-            expected = 1 if kind == 'timeout' else (0 if kind in ('quota', 'unconfirmed') else 2)
+            expected = 2 if kind == 'timeout' else (0 if kind in ('quota', 'unconfirmed') else 2)
             assert len(result) == expected, (kind, len(result))
+        calls, result = run('timeout_always')
+        assert len(calls) == 2 * (1 + r.TIMEOUT_RETRY_LIMIT), (len(calls), r.TIMEOUT_RETRY_LIMIT)
+        assert not result
         calls, result = run('captcha_forever')
         assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
         # anti_bot=0：不带验证码也不求解；若服务端中途要验证码，自动切换成携带滑块重试。

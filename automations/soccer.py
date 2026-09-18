@@ -31,6 +31,7 @@ SUBMIT_INTERVAL_SECONDS = 2.0
 RETRY_WINDOW_SECONDS = 120
 MAX_SUBMISSION_ATTEMPTS = 60
 MAX_VERIFICATION_ATTEMPTS = 6
+TIMEOUT_RETRY_LIMIT = 1
 MAX_RECOVERY_ATTEMPTS = 3
 VERIFY_INTERVAL_SECONDS = 0.5
 OPENING_GUARD_MS = 100       # Avoid submitting before the server's opening boundary.
@@ -256,6 +257,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
     attempts, generation, recovery_attempts = 0, 0, 0
     attempts_by_target = {period["id"]: 0 for period in periods}
     in_flight, awaiting_verification = set(), set()
+    timeout_targets, timeout_retry_counts = set(), {}
     # All periods share one account-level submission cadence. Different periods
     # may overlap in flight, but the next POST starts at least 2s later.
     last_submit_at, retry_after = -float("inf"), {}
@@ -375,10 +377,24 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                         for target in pending:
                             verification_rounds[target] = verification_rounds.get(target, 0) + 1
                             if verification_rounds[target] >= MAX_VERIFICATION_ATTEMPTS:
-                                halted[target] = "核实超时，结果不确定"
-                                uncertain.add(target)
                                 awaiting_verification.discard(target)
-                                audit("verification_uncertain", targets=[target])
+                                if (target in timeout_targets
+                                        and timeout_retry_counts.get(target, 0) < TIMEOUT_RETRY_LIMIT
+                                        and now() < submission_deadline):
+                                    timeout_targets.discard(target)
+                                    timeout_retry_counts[target] = timeout_retry_counts.get(target, 0) + 1
+                                    verification_rounds[target] = 0
+                                    retry_after[target] = max(
+                                        retry_after.get(target, 0),
+                                        time.monotonic() + SUBMIT_INTERVAL_SECONDS,
+                                    )
+                                    audit("timeout_retry", targets=[target],
+                                          attempt=timeout_retry_counts[target],
+                                          delay=SUBMIT_INTERVAL_SECONDS)
+                                else:
+                                    halted[target] = "核实超时，结果不确定"
+                                    uncertain.add(target)
+                                    audit("verification_uncertain", targets=[target])
                         maybe_stop_locked()
                     retry_at = max(retry_at or 0, time.monotonic() + VERIFY_INTERVAL_SECONDS)
 
@@ -461,10 +477,17 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     retry_after[target] = time.monotonic() + delay
                 audit("submission_retry", error=type(exc).__name__, retry_after=delay, targets=[target])
             return
+        except requests.Timeout as exc:
+            with lock:
+                awaiting_verification.add(target)
+                timeout_targets.add(target)
+            audit("submission_unknown", error=type(exc).__name__, targets=[target], retryable=True)
+            verify_wake.set()  # The server may have accepted a request whose response was lost.
+            return
         except requests.RequestException as exc:
             with lock:
                 awaiting_verification.add(target)
-            audit("submission_unknown", error=type(exc).__name__, targets=[target])
+            audit("submission_unknown", error=type(exc).__name__, targets=[target], retryable=False)
             verify_wake.set()  # The server may have accepted a request whose response was lost.
             return
         except (RuntimeError, ValueError, KeyError, TypeError) as exc:
