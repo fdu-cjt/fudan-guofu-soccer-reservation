@@ -196,6 +196,22 @@ def available_slots(calendar, own, current, slot_numbers=None):
     return available
 
 
+def report_daily_bookings(client, day, calendar, target_periods=None):
+    """At 07:05, report the selected periods found in the user's bookings."""
+    records = client.mine()
+    periods = calendar_periods(calendar)
+    if target_periods is not None:
+        periods = [period for period in periods if period["id"] in target_periods]
+    report = {}
+    for period in periods:
+        record = own_slot(records, str(day), period["id"])
+        report[period["str_time"]] = str(record.get("status_name") or "已预约") if record else "未查到预约"
+    summary = "；".join(f"{period}：{status}" for period, status in report.items()) or "无目标时段"
+    log(f"{day} 07:05预约汇报：{summary}")
+    audit("daily_report", day=str(day), periods=report)
+    return report
+
+
 def _submission_kind(response):
     """Classify the platform reply before deciding whether another POST is safe."""
     code = str(response.get("e") or "").upper()
@@ -880,10 +896,19 @@ def run(args, continuous=True):
                                 if not preview else None)
             poll(client, day, deadline, commit=not preview, once=preview, anti_bot=info["config"]["anti_bot"],
                  calendar=calendar, own=own, opening=dispatch_opening, target_periods=target_periods)
-            if args.watch_seconds:
-                watch_access(client, day, args.watch_seconds)
             if preview or not continuous:
                 return
+            wait_until(opening + timedelta(minutes=5))
+            try:
+                report_daily_bookings(client, day, calendar, target_periods=target_periods)
+            except (SessionExpired, BrowserUnavailable) as exc:
+                must_login = True
+                audit("daily_report_error", error=type(exc).__name__, recovery=True)
+            except (AccessBlocked, TransientError, requests.RequestException,
+                    RuntimeError, ValueError, KeyError, TypeError) as exc:
+                audit("daily_report_error", error=type(exc).__name__, reason=str(exc)[:200])
+            if args.watch_seconds:
+                watch_access(client, day, args.watch_seconds)
             first_cycle = False
             next_opening = next_window(opening + timedelta(minutes=5))[0]
             audit("window_complete", next_opening=next_opening.isoformat())

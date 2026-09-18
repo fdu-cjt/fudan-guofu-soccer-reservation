@@ -388,7 +388,7 @@ def test_continuous_windows():
     def poll(*args, **kwargs):
         poll_days.append(args[1])
         if len(poll_days) == 1:
-            clock[0] = opening + timedelta(minutes=5)
+            clock[0] = opening + timedelta(minutes=2)
             return {}
         raise KeyboardInterrupt
     with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
@@ -406,10 +406,25 @@ def test_continuous_windows():
     assert waits == [
         datetime(2026, 9, 17, 6, 55, tzinfo=r.SHANGHAI),
         datetime(2026, 9, 17, 6, 57, tzinfo=r.SHANGHAI),
+        datetime(2026, 9, 17, 7, 5, tzinfo=r.SHANGHAI),
         datetime(2026, 9, 18, 6, 55, tzinfo=r.SHANGHAI),
         datetime(2026, 9, 18, 6, 57, tzinfo=r.SHANGHAI),
     ], waits
     client.http.close.assert_called_once()
+
+
+def test_daily_report():
+    calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
+    day = date(2026, 9, 17)
+    record = {'id': 3892, 'group_id': 1029, 'status': 3, 'status_name': '已预约',
+              'detail': {str(day): [{'period_id': 3892, 'is_cancel': 0}]}}
+    client = Mock()
+    client.mine.return_value = [record]
+    with patch.object(r, 'log') as log, patch.object(r, 'audit') as audit:
+        report = r.report_daily_bookings(client, day, calendar, target_periods={3892, 3893})
+    assert report == {'18:00-19:00': '已预约', '19:00-20:00': '未查到预约'}, report
+    assert '07:05预约汇报' in log.call_args.args[0]
+    audit.assert_called_once_with('daily_report', day=str(day), periods=report)
 
 
 def check():
@@ -451,6 +466,7 @@ def check():
     test_early_preparation()
     test_startup_availability()
     test_continuous_windows()
+    test_daily_report()
 
     with TemporaryDirectory() as tmp, patch.object(r, 'LOCAL', Path(tmp)), \
             patch.object(r, 'DEFAULT_LOG_PATH', Path(tmp) / 'default.log'), patch.object(r, 'log'):
