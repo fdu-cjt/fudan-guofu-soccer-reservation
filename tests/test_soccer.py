@@ -328,19 +328,30 @@ def test_startup_availability():
     client.calendar.return_value = calendar
     client.mine.return_value = own
     cutoff = current.replace(day=17, hour=6, minute=55)
-    with patch.object(r, 'now', return_value=current), patch.object(r, 'log'), \
+    with patch.object(r, 'now', return_value=current), patch.object(r, 'log') as log, \
             patch.object(r, 'poll', side_effect=[{}, {3893: '已预约'}, {}]) as poll:
         assert r.book_available(client, cutoff, 0)
         assert [c.args[1] for c in poll.call_args_list] == list(expected)
         assert [c.kwargs['target_periods'] for c in poll.call_args_list] == list(expected.values())
         assert all(current < c.args[2] <= current+r.timedelta(minutes=5) for c in poll.call_args_list)
         assert client.calendar.call_args_list[0].args == (current.date(), date(2026,9,18))
+        messages = [call.args[0] for call in log.call_args_list]
+        assert '2026-09-16 至 2026-09-18' in messages[0], messages
+        assert any('2026-09-16，时段 19:00-20:00 有候选空位' in text for text in messages), messages
     # Recheck closes the race between the initial scan and attempting a later date.
     full = copy.deepcopy(calendar)
     for fields in full['data'].values():
         for periods in fields.values():
             for cell in periods.values():
                 cell['num'] = '0'
+    client.calendar.side_effect = [full]
+    with patch.object(r, 'now', return_value=current), patch.object(r, 'log') as log, \
+            patch.object(r, 'poll') as poll:
+        assert not r.book_available(client, cutoff, 0, slot_numbers={1})
+        poll.assert_not_called()
+        messages = [call.args[0] for call in log.call_args_list]
+        assert '时段 18:00-19:00。' in messages[0] and '19:00-20:00' not in messages[0], messages
+        assert any('未发现可立即尝试的空位' in text for text in messages), messages
     client.calendar.side_effect = [calendar, full, full, full]
     with patch.object(r, 'now', return_value=current), patch.object(r, 'poll') as poll:
         assert not r.book_available(client, cutoff, 0)
@@ -363,7 +374,7 @@ def test_startup_availability():
     clock = [current]
     def advance(moment):
         clock[0] = moment
-    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
+    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log') as log, \
             patch.object(r, 'now', side_effect=lambda: clock[0]), patch.object(r, 'wait_until', side_effect=advance) as wait, \
             patch.object(r, 'Client', return_value=client), patch.object(r, 'poll') as poll, \
             patch.object(r, 'book_available', side_effect=[r.SessionExpired('expired'), True]) as startup, \
@@ -378,6 +389,7 @@ def test_startup_availability():
             current.replace(day=17, hour=6, minute=57),
         ]
         poll.assert_called_once()
+        assert any('下一次准备时间：2026-09-17 06:55' in call.args[0] for call in log.call_args_list)
         client.http.close.assert_called_once()
 
 

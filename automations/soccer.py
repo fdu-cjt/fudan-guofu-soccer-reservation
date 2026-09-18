@@ -712,10 +712,19 @@ def target_day(anchor, offset_days=2):
 
 def book_available(client, cutoff, anti_bot, slot_numbers=None):
     current = now()
-    calendar = client.calendar(current.date(), target_day(current.date()))
+    end_day = target_day(current.date())
+    selected = "、".join({1: "18:00-19:00", 2: "19:00-20:00"}[number]
+                        for number in sorted(slot_numbers if slot_numbers is not None else {1, 2}))
+    log(f"开始检查已有空位：{current.date()} 至 {end_day}，时段 {selected}。")
+    calendar = client.calendar(current.date(), end_day)
     own = client.mine()
     candidates = available_slots(calendar, own, now(), slot_numbers=slot_numbers)
     audit("startup_availability", dates={str(day): sorted(ids) for day, ids in candidates.items()})
+    if not candidates:
+        log("空位检查结果：未发现可立即尝试的空位（已排除已开始、本人已预约及无可用名额的时段）。")
+    labels = {period["id"]: period["str_time"] for period in calendar["time"]}
+    for day, targets in candidates.items():
+        log(f"空位检查结果：{day}，时段 {'、'.join(labels[target] for target in sorted(targets))} 有候选空位，提交前将再次核实。")
     confirmed = False
     for day in candidates:
         if now() >= cutoff:
@@ -730,7 +739,7 @@ def book_available(client, cutoff, anti_bot, slot_numbers=None):
         deadline = min(now()+timedelta(minutes=5), cutoff, start)
         if now() >= deadline:
             continue
-        log(f"启动发现空位：{day}，时段 {sorted(targets)}；立即尝试至 {deadline:%H:%M:%S}。")
+        log(f"启动发现空位：{day}，时段 {'、'.join(labels[target] for target in sorted(targets))}；立即尝试至 {deadline:%H:%M:%S}。")
         result = poll(client, day, deadline, calendar=calendar, own=own,
                       anti_bot=anti_bot, once=True, target_periods=targets)
         confirmed = bool(result) or confirmed
@@ -858,7 +867,10 @@ def run(args, continuous=True):
                                        info["config"]["anti_bot"], slot_numbers=slot_numbers)
                         first_cycle = False
                         startup = False
-                        log("启动检查完成；无论是否提前预约成功，继续等待本轮早上放号。")
+                        if now() < preparation:
+                            log(f"启动空位检查完成；等待期间不持续扫描空位。下一次准备时间：{preparation:%Y-%m-%d %H:%M}，放号时间：{opening:%Y-%m-%d %H:%M}。")
+                        else:
+                            log(f"启动空位检查完成；已进入本轮放号准备阶段，放号时间：{opening:%Y-%m-%d %H:%M}。")
                         wait_until(preparation)
                         continue
                     calendar, own = client.calendar(day), client.mine()
