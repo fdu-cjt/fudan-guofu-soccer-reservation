@@ -12,5 +12,4 @@ node_modules/
 .env.*
 credentials.env
 /logs/
-!.local/credentials.env
 *.py[cod]
