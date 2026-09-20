@@ -27,11 +27,12 @@ from fudan_spider.apis.soccer_api import (
 from fudan_spider.utils import SHANGHAI, git_version, load_env_file
 
 CAPTCHA_POOL_SIZE = 2
-SUBMIT_INTERVAL_SECONDS = 2.0
+SUBMIT_INTERVAL_SECONDS = 1.0
+FIRST_PAIR_GAP_SECONDS = 2.0
 RETRY_WINDOW_SECONDS = 120
-MAX_SUBMISSION_ATTEMPTS = 60
+MAX_SUBMISSION_ATTEMPTS = 20
+RETRY_DELAY_SECONDS = 1.0
 MAX_VERIFICATION_ATTEMPTS = 3
-TIMEOUT_RETRY_LIMIT = 1
 MAX_RECOVERY_ATTEMPTS = 3
 VERIFY_INTERVAL_SECONDS = 0.5
 OPENING_GUARD_MS = 100       # Avoid submitting before the server's opening boundary.
@@ -228,14 +229,15 @@ def _submission_kind(response):
             word in text for word in ("429", "too many", "访问频繁", "请求过于频繁", "拒绝访问",
                                       "防护", "blocked")):
         return "blocked", message
-    if any(word in text for word in ("点击太频繁", "操作太频繁", "提交太频繁")):
+    if any(word in text for word in ("点击太频繁", "操作太频繁", "提交太频繁", "预约太频繁",
+                                     "请求太频繁", "间隔太短", "提交间隔", "请求间隔")):
         return "retry", message
     if any(word in text for word in ("预约次数", "最多预约", "没有权限", "无权限", "表单", "手机号",
-                                     "规则发生变化", "规则已变更", "不允许预约")):
+                                     "规则发生变化", "规则已变更", "不允许预约", "合计达到上限")):
         return "account_stop", message
     if any(word in text for word in ("时段冲突", "不可预约", "已约满")):
         return "target_stop", message
-    if any(word in text for word in ("系统繁忙", "稍后再试", "服务异常", "暂不可用", "未开放", "网络")):
+    if any(word in text for word in ("系统繁忙", "稍后再试", "服务异常", "暂不可用", "未开放", "网络", "系统超时", "不在服务时间")):
         return "retry", message
     return "target_stop", message
 
@@ -245,6 +247,22 @@ def _rate_limited(exc):
     return isinstance(exc, TransientError) and exc.status_code == 429 or any(
         marker in text for marker in ("http 429", "http 403", "http 412", "too many",
                                      "访问频繁", "请求过于频繁", "防护", "blocked"))
+
+
+def _soft_submission_limit(message):
+    text = str(message).lower()
+    return any(marker in text for marker in (
+        "429", "too many", "too frequent", "too_frequent", "访问频繁", "请求过于频繁",
+        "预约太频繁", "请求太频繁", "点击太频繁", "操作太频繁", "提交太频繁",
+        "间隔太短", "提交间隔", "请求间隔")) and not any(
+        marker in text for marker in ("拒绝访问", "防护", "blocked"))
+
+
+def _soft_rate_limited(exc):
+    text = str(exc).lower()
+    return ((isinstance(exc, TransientError) and exc.status_code == 429
+             and not any(marker in text for marker in ("拒绝访问", "防护", "blocked")))
+            or _soft_submission_limit(exc))
 
 
 def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None, opening=None, anti_bot=0,
@@ -261,7 +279,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
         raise ValueError("提交间隔必须大于零。")
     opening = opening or now()
     submission_deadline = min(deadline, opening + timedelta(seconds=RETRY_WINDOW_SECONDS))
-    attempt_limit = 1 if once else MAX_SUBMISSION_ATTEMPTS
+    attempt_limit = len(periods) if once else MAX_SUBMISSION_ATTEMPTS
     confirmed, halted, uncertain = {}, {}, set()
     workers, futures = [], []
     lock = threading.Lock()
@@ -272,10 +290,10 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
         solving.set()
     attempts, generation, recovery_attempts = 0, 0, 0
     attempts_by_target = {period["id"]: 0 for period in periods}
-    in_flight, awaiting_verification = set(), set()
-    timeout_targets, timeout_retry_counts = set(), {}
-    # All periods share one account-level submission cadence. Different periods
-    # may overlap in flight, but the next POST starts at least 2s later.
+    in_flight, awaiting_verification, unknown_targets = set(), set(), set()
+    retry_order = [period["id"] for period in periods]
+    retry_started = False
+    pause_reason = None
     last_submit_at, retry_after = -float("inf"), {}
     submit_gate, next_submit_at = threading.Lock(), -float("inf")
     pool = queue.Queue(maxsize=CAPTCHA_POOL_SIZE)
@@ -295,7 +313,9 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 if record and period["id"] not in confirmed:
                     confirmed[period["id"]] = str(record.get("status_name") or "已预约")
                     awaiting_verification.discard(period["id"])
+                    unknown_targets.discard(period["id"])
                     uncertain.discard(period["id"])
+                    halted.pop(period["id"], None)
                     audit("confirmed", targets=[period["id"]], status=confirmed[period["id"]])
             maybe_stop_locked()
 
@@ -304,17 +324,51 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             if target not in confirmed:
                 halted[target] = reason
                 awaiting_verification.discard(target)
+                unknown_targets.discard(target)
                 if is_uncertain:
                     uncertain.add(target)
             audit("target_stopped", targets=[target], reason=reason, uncertain=is_uncertain)
             maybe_stop_locked()
 
     def pause_all(reason, access=False, **fields):
+        nonlocal pause_reason
+        pause_reason = str(fields.get("message") or fields.get("error") or reason)
         if access:
             access_blocked.set()
         stop.set()
         verify_wake.set()
         audit("submission_paused", reason=reason, **fields)
+
+    def schedule_retry(target, reason, delay=None, timeout=False):
+        nonlocal retry_started
+        delay = RETRY_DELAY_SECONDS if delay is None else delay
+        with lock:
+            if not retry_started:
+                retry_started = True
+                # Both initial requests timing out keep the default A/B order.
+                if not timeout:
+                    index = retry_order.index(target)
+                    retry_order[:] = retry_order[index:] + retry_order[:index]
+                audit("retry_started", reason=reason, first_target=retry_order[0])
+            retry_after[target] = time.monotonic() + delay
+            audit("retry_scheduled", targets=[target], reason=reason, delay=delay)
+
+    def exhaust_locked():
+        targets = []
+        for period in periods:
+            target = period["id"]
+            if target in confirmed or target in halted or (target in awaiting_verification and target not in unknown_targets):
+                continue
+            if target in awaiting_verification or target in unknown_targets:
+                uncertain.add(target)
+            halted[target] = "已达到提交次数上限"
+            awaiting_verification.discard(target)
+            unknown_targets.discard(target)
+            targets.append(target)
+        if targets:
+            audit("submission_exhausted", targets=targets, attempts=attempts,
+                  total_limit=attempt_limit)
+        maybe_stop_locked()
 
     update(own)
     if not commit:
@@ -392,22 +446,14 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     with lock:
                         for target in pending:
                             verification_rounds[target] = verification_rounds.get(target, 0) + 1
-                            if verification_rounds[target] >= MAX_VERIFICATION_ATTEMPTS:
+                            keep_retrying = (not once
+                                              and target in unknown_targets
+                                              and attempts_by_target[target] < attempt_limit)
+                            if verification_rounds[target] >= MAX_VERIFICATION_ATTEMPTS and not keep_retrying:
+                                halted[target] = "核实超时，结果不确定"
+                                uncertain.add(target)
                                 awaiting_verification.discard(target)
-                                if (target in timeout_targets
-                                        and timeout_retry_counts.get(target, 0) < TIMEOUT_RETRY_LIMIT
-                                        and now() < submission_deadline):
-                                    timeout_targets.discard(target)
-                                    timeout_retry_counts[target] = timeout_retry_counts.get(target, 0) + 1
-                                    verification_rounds[target] = 0
-                                    # The shared dispatch gate already enforces the account interval.
-                                    audit("timeout_retry", targets=[target],
-                                          attempt=timeout_retry_counts[target],
-                                          extra_delay=0)
-                                else:
-                                    halted[target] = "核实超时，结果不确定"
-                                    uncertain.add(target)
-                                    audit("verification_uncertain", targets=[target])
+                                audit("verification_uncertain", targets=[target])
                         maybe_stop_locked()
                     retry_at = max(retry_at or 0, time.monotonic() + VERIFY_INTERVAL_SECONDS)
 
@@ -443,7 +489,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                     stop.wait(.2)
 
     local = threading.local()
-    # One worker per selected period; the account-level cadence still spaces starts.
+    # One worker per selected period; retries normally share the account cadence.
     executor = ThreadPoolExecutor(max_workers=max(1, len(periods)))
 
     def submit(target, payload, planned_at):
@@ -459,15 +505,26 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             with submit_gate:
                 delay = next_submit_at - time.monotonic()
                 if delay > 0:
-                    stop.wait(min(delay, max(0, (deadline-now()).total_seconds())))
+                    stop.wait(min(delay, max(0, (submission_deadline-now()).total_seconds())))
                 if stop.is_set() or now() >= submission_deadline:
                     return
+                with lock:
+                    if stop.is_set() or target in confirmed or target in halted:
+                        return
                 if isinstance(local.client.http, BrowserSession):
                     local.client.http.planned_at = planned_at
-                next_submit_at = time.monotonic() + SUBMIT_INTERVAL_SECONDS
+                sent_at = time.monotonic()
+                next_submit_at = sent_at + SUBMIT_INTERVAL_SECONDS
+                with lock:
+                    if target == first_lead and attempts_by_target[target] == 1 and first_follow is not None:
+                        first_due[first_follow] = sent_at + FIRST_PAIR_GAP_SECONDS
             response = local.client.submit(payload)
             if not isinstance(response, dict) or "e" not in response:
                 raise ValueError("预约响应结构错误")
+            with lock:
+                if target == first_lead and attempts_by_target[target] == 1 and first_follow is not None:
+                    first_due[first_follow] = min(first_due[first_follow],
+                                                 time.monotonic() + SUBMIT_INTERVAL_SECONDS)
         except SubmissionSkipped:
             halt_target(target, "浏览器跳过了提交窗口")
             return
@@ -481,30 +538,27 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             pause_all("submission_access_blocked", access=True, targets=[target], error=str(exc)[:200])
             return
         except TransientError as exc:
-            if _rate_limited(exc):
-                pause_all("submission_rate_limited", access=True, targets=[target],
-                          error=str(exc)[:200], retry_after=exc.retry_after)
+            if _rate_limited(exc) and not _soft_rate_limited(exc):
+                pause_all("submission_rate_limited", access=True, targets=[target], error=str(exc)[:200])
             else:
-                delay = max(SUBMIT_INTERVAL_SECONDS, exc.retry_after or 0)
-                with lock:
-                    retry_after[target] = time.monotonic() + delay
-                audit("submission_retry", error=type(exc).__name__, retry_after=delay, targets=[target])
-            return
-        except requests.Timeout as exc:
-            with lock:
-                awaiting_verification.add(target)
-                timeout_targets.add(target)
-            audit("submission_unknown", error=type(exc).__name__, targets=[target], retryable=True)
-            verify_wake.set()  # The server may have accepted a request whose response was lost.
+                schedule_retry(target, type(exc).__name__, max(RETRY_DELAY_SECONDS, exc.retry_after or 0))
             return
         except requests.RequestException as exc:
+            if _rate_limited(exc) and not _soft_rate_limited(exc):
+                pause_all("submission_rate_limited", access=True, targets=[target], error=str(exc)[:200])
+                return
             with lock:
                 awaiting_verification.add(target)
-            audit("submission_unknown", error=type(exc).__name__, targets=[target], retryable=False)
-            verify_wake.set()  # The server may have accepted a request whose response was lost.
+                unknown_targets.add(target)
+            timed_out = isinstance(exc, requests.Timeout)
+            schedule_retry(target, type(exc).__name__, 0 if timed_out else RETRY_DELAY_SECONDS, timeout=timed_out)
+            audit("submission_unknown", error=type(exc).__name__, targets=[target], retrying=not once)
+            verify_wake.set()
             return
         except (RuntimeError, ValueError, KeyError, TypeError) as exc:
-            if _rate_limited(exc):
+            if _soft_rate_limited(exc):
+                schedule_retry(target, str(exc)[:200])
+            elif _rate_limited(exc):
                 pause_all("submission_rate_limited", access=True, targets=[target], error=str(exc)[:200])
             elif isinstance(exc, (ValueError, KeyError, TypeError)):
                 halt_target(target, f"提交响应结构错误：{type(exc).__name__}")
@@ -512,6 +566,9 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 halt_target(target, f"未识别的提交错误：{type(exc).__name__}", is_uncertain=True)
             return
         else:
+            with lock:
+                awaiting_verification.discard(target)
+                unknown_targets.discard(target)
             kind, message = _submission_kind(response)
             if kind == "accepted":
                 with lock:
@@ -522,17 +579,16 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 solving.set()
                 audit("verification_required", stage="submission", targets=[target])
             elif kind == "blocked":
-                pause_all("submission_response_blocked", access=True, targets=[target], message=message)
+                if _soft_submission_limit(message):
+                    schedule_retry(target, message)
+                else:
+                    pause_all("submission_response_blocked", access=True, targets=[target], message=message)
             elif kind == "account_stop":
-                pause_all("existing_pending_appointment", targets=[target], message=message)
+                pause_all("account_rejected", targets=[target], message=message)
             elif kind == "target_stop":
                 halt_target(target, message)
             else:
-                delay = SUBMIT_INTERVAL_SECONDS
-                with lock:
-                    retry_after[target] = max(retry_after.get(target, 0), time.monotonic() + delay)
-                audit("submission_retry", code=str(response.get("e"))[:80], message=message,
-                      retry_after=delay, targets=[target])
+                schedule_retry(target, message)
         finally:
             with lock:
                 in_flight.discard(target)
@@ -541,6 +597,11 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                threading.Thread(target=produce_captcha, name="soccer-captcha")]
     anchor = time.monotonic() + (opening-now()).total_seconds()
     first_due = {p['id']: anchor for p in periods}
+    initial_targets = [p['id'] for p in periods if p['id'] not in confirmed]
+    first_lead = initial_targets[0] if initial_targets else None
+    first_follow = initial_targets[1] if len(initial_targets) == 2 else None
+    if first_follow is not None:
+        first_due[first_follow] = float("inf")
     try:
         for thread in threads:
             thread.start()
@@ -595,6 +656,11 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             if now() < opening:
                 stop.wait(min(.1, max(0, (opening-now()).total_seconds())))
                 continue
+            if not once and attempts >= attempt_limit and not in_flight:
+                with lock:
+                    exhaust_locked()
+                stop.wait(.01)
+                continue
             pending = []
             for future in futures:
                 if future.done():
@@ -605,11 +671,13 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             # Give untouched periods their first opportunity before retrying a
             # period that already received a response; otherwise a fast busy
             # response from the first period can starve the second one.
+            with lock:
+                order = list(retry_order)
             ordered_periods = sorted(
                 periods,
                 key=lambda period: (
                     attempts_by_target[period["id"]] > 0,
-                    period["id"],
+                    order.index(period["id"]),
                 ),
             )
             for period in ordered_periods:
@@ -618,16 +686,39 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 with lock:
                     target = period["id"]
                     current_mono = time.monotonic()
+                    retryable_unknown = (not once
+                                         and target in unknown_targets
+                                         and attempts_by_target[target] < attempt_limit)
                     if (target in in_flight or target in confirmed or target in halted
-                            or target in awaiting_verification):
+                            or (target in awaiting_verification and not retryable_unknown)):
                         continue
-                    if now() >= submission_deadline or attempts_by_target[target] >= attempt_limit:
-                        halted[target] = "提交窗口结束" if now() >= submission_deadline else "已达到提交次数上限"
+                    if now() >= submission_deadline:
+                        halted[target] = "提交窗口结束"
                         audit("submission_exhausted", targets=[target], attempts=attempts_by_target[target])
                         maybe_stop_locked()
                         continue
-                    due = max(first_due[target], retry_after.get(target, 0),
-                              last_submit_at + SUBMIT_INTERVAL_SECONDS)
+                    if not once and attempts >= attempt_limit and not in_flight:
+                        exhaust_locked()
+                        break
+                    if once and attempts_by_target[target] > 0:
+                        if target not in awaiting_verification:
+                            halted[target] = "单次尝试已完成"
+                            maybe_stop_locked()
+                        continue
+                    if attempts >= attempt_limit:
+                        continue
+                    if (attempts_by_target[target] > 0 and first_follow is not None
+                            and attempts_by_target[first_follow] == 0
+                            and first_follow not in confirmed and first_follow not in halted):
+                        continue  # Reserve B's first opportunity before retrying A.
+                    if (target == first_follow and first_due[target] == float("inf")
+                            and (first_lead in confirmed or first_lead in halted)):
+                        first_due[target] = current_mono
+                    if attempts_by_target[target] == 0:
+                        due = max(first_due[target], last_submit_at + SUBMIT_INTERVAL_SECONDS)
+                    else:
+                        due = max(first_due[target], retry_after.get(target, 0),
+                                  last_submit_at + SUBMIT_INTERVAL_SECONDS)
                     if current_mono < due:
                         continue
                     planned_at = (opening.timestamp() + due - anchor) * 1000
@@ -645,13 +736,17 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                         audit("captcha_pending", targets=[period["id"]])
                         continue
                 with lock:
-                    if stop.is_set() or target in confirmed or target in halted or target in awaiting_verification:
+                    retryable_unknown = (not once
+                                         and target in unknown_targets
+                                         and attempts_by_target[target] < attempt_limit)
+                    if (stop.is_set() or target in confirmed or target in halted
+                            or (target in awaiting_verification and not retryable_unknown)):
                         continue
-                    if attempts_by_target[target] >= attempt_limit:
-                        halted[target] = "已达到提交次数上限"
-                        audit("submission_exhausted", targets=[target], attempts=attempts_by_target[target])
-                        maybe_stop_locked()
+                    if attempts >= attempt_limit:
                         continue
+                    if attempts_by_target[target] > 0:
+                        index = retry_order.index(target)
+                        retry_order[:] = retry_order[index+1:] + retry_order[:index+1]
                     in_flight.add(target)
                     last_submit_at = current_mono
                     attempts += 1
@@ -689,12 +784,18 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 audit("final_verification_error", error=type(exc).__name__, reason=str(exc)[:200])
             except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as exc:
                 audit("final_verification_error", error=type(exc).__name__)
+        if pause_reason:
+            for period in periods:
+                target = period["id"]
+                if target not in confirmed:
+                    halted[target] = f"本轮停止：{pause_reason}" + ("；预约结果不确定" if target in uncertain else "")
         for period in periods:
             target = period["id"]
-            status = confirmed.get(target) or ("结果不确定" if target in uncertain else halted.get(target, "未确认成功"))
+            status = confirmed.get(target) or halted.get(target) or ("结果不确定" if target in uncertain else "未确认成功")
             log(f"{day} {period['str_time']}：{status}")
         audit("run_summary", attempts=attempts, confirmed=sorted(confirmed),
-              stopped=halted, uncertain=sorted(uncertain), targets=[p["id"] for p in periods])
+              stopped=halted, uncertain=sorted(uncertain), targets=[p["id"] for p in periods],
+              retry_started=retry_started, pause_reason=pause_reason)
     return confirmed
 
 
@@ -821,6 +922,7 @@ def run(args, continuous=True):
     try:
         audit("runtime_version", **git_version())
         load_credentials()
+        log("预约调度：先发A，B在A响应后1秒或首发后2秒较早时发送；请求5秒超时，超时立即参与重试，普通失败冷却1秒；交替发送间隔1秒，合计最多20次。")
         slot_numbers = getattr(args, "slot_numbers", None)
         if not isinstance(slot_numbers, (list, tuple, set)):
             slot_numbers = {1, 2}
@@ -906,9 +1008,12 @@ def run(args, continuous=True):
                                 if not preview else None)
             poll(client, day, deadline, commit=not preview, once=preview, anti_bot=info["config"]["anti_bot"],
                  calendar=calendar, own=own, opening=dispatch_opening, target_periods=target_periods)
+            if args.watch_seconds:
+                watch_access(client, day, args.watch_seconds)
             if preview or not continuous:
                 return
             wait_until(opening + timedelta(minutes=5))
+            must_login = False
             try:
                 report_daily_bookings(client, day, calendar, target_periods=target_periods)
             except (SessionExpired, BrowserUnavailable) as exc:
@@ -917,13 +1022,10 @@ def run(args, continuous=True):
             except (AccessBlocked, TransientError, requests.RequestException,
                     RuntimeError, ValueError, KeyError, TypeError) as exc:
                 audit("daily_report_error", error=type(exc).__name__, reason=str(exc)[:200])
-            if args.watch_seconds:
-                watch_access(client, day, args.watch_seconds)
             first_cycle = False
             next_opening = next_window(opening + timedelta(minutes=5))[0]
             audit("window_complete", next_opening=next_opening.isoformat())
             wait_until(next_opening - timedelta(minutes=5))
-            must_login = False
     except BaseException as exc:
         audit("run_error", error=type(exc).__name__)
         raise

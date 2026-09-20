@@ -32,9 +32,9 @@ async function handle(c) {
       if(post) {posts++; active++; peak=Math.max(peak,active); output({event:'progress',stage:'local_arrival',atMs:Date.now()});}
       req.resume();
       setTimeout(()=>{res.setHeader('content-type','application/json');
-        res.end(JSON.stringify(post?{e:'ERROR',m:'busy'}:{e:'OK',d:{total:0,data:[]}}));
+        res.end(JSON.stringify(post?{e:'ERROR',m:'系统繁忙'}:{e:'OK',d:{total:0,data:[]}}));
         if(post)active--;
-      },post?350:5);
+      },req.url.endsWith('/hang')?5500:(post?350:5));
     });
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     origin='http://127.0.0.1:'+server.address().port;
@@ -79,10 +79,15 @@ def benchmark():
                 body='test', headers={}, timeoutMs=1000, openingMs=time.time()*1000+1000,
                 deadlineMs=time.time()*1000+2000)
             assert result['skipped'] and bridge.call('stats')['posts'] == 0
+            started = time.monotonic()
+            result = bridge.call('fetch', url=r.API+'/site/hang', method='GET',
+                                 headers={}, timeoutMs=5000)
+            assert result['failure'] == 'AbortError', result
+            assert 4.8 <= time.monotonic()-started < 6.5, result
             calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
             opening = r.now()+r.timedelta(seconds=.2)
             deadline = opening+r.timedelta(seconds=20)
-            with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), patch.object(r, 'MAX_SUBMISSION_ATTEMPTS', 6):
                 r.setup_logging(Path(directory)/'timing.log')
                 try:
                     r.poll(client, opening.date()+r.timedelta(days=2), deadline,
@@ -92,13 +97,15 @@ def benchmark():
             timing = sorted([e for e in events if e.get('stage') == 'fetch_timing'
                              and e.get('method') == 'POST' and not e.get('skipped')], key=lambda e:e['sentAt'])
             arrivals = [e['atMs'] for e in events if e.get('stage') == 'local_arrival']
-            assert 180 <= len(timing) <= 200 and len(arrivals) == len(timing), {
+            assert len(timing) == 6 and len(arrivals) == len(timing), {
                 'timing': len(timing), 'arrivals': len(arrivals), 'server': bridge.call('stats'),
                 'errors': [e for e in r.RUN_EVENTS if e.get('event') in
                            ('submission_unknown', 'submission_retry', 'submission_skipped', 'run_summary')][-8:]}
             assert all(opening.timestamp()*1000 <= e['sentAt'] < deadline.timestamp()*1000 for e in timing)
             stats = bridge.call('stats')
-            assert stats['peak'] >= 3, '350ms responses must overlap later rounds'
+            assert stats['peak'] == 1, '350ms responses should finish before the next scheduled send'
+            assert 1250 <= timing[1]['sentAt']-timing[0]['sentAt'] < 2000, timing
+            assert all(b['sentAt']-a['sentAt'] >= 980 for a,b in zip(timing[1:],timing[2:])), timing
             def distribution(values):
                 values=sorted(values)
                 return {label:round(values[round((len(values)-1)*q)],2) for label,q in [('p50',.5),('p95',.95),('max',1)]}

@@ -181,13 +181,13 @@ def test_parallel_dispatch():
         workers.append(worker)
         return worker
     client.fork.side_effect = fork
-    with patch.object(r, 'log'), patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .2), \
+    with patch.object(r, 'log'), patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .2), patch.object(r, 'FIRST_PAIR_GAP_SECONDS', .2), \
          patch.object(r, 'VERIFY_INTERVAL_SECONDS', .01):
         r.poll(client, day, deadline, calendar=calendar, own=[], anti_bot=0,
                opening=opening, verifier_factory=lambda c: verifier)
     assert len(calls) >= 2, calls
     assert {p for p, _, _ in calls[:2]} == {3892, 3893}
-    assert .18 <= calls[1][1] - calls[0][1], calls
+    assert .18 <= calls[1][1] - calls[0][1] < .3, calls
     assert calls[1][1] < ends[0], '第二个时段不应等待第一个慢请求结束'
     assert all(opening <= t < deadline for _, _, t in calls), calls
     assert all(w.http.close.called for w in workers) and verifier.http.close.called
@@ -393,10 +393,10 @@ def test_startup_availability():
         client.http.close.assert_called_once()
 
 
-def test_continuous_windows():
+def test_continuous_windows(report_error=None):
     """Normal runs keep the session and enter the next day's release window."""
     clock = [datetime(2026, 9, 17, 6, 54, tzinfo=r.SHANGHAI)]
-    waits, poll_days = [], []
+    waits, poll_days, report_times = [], [], []
     calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     client = Mock(user='test')
     client.settings.return_value = {'config': {'anti_bot': 0}}
@@ -413,10 +413,17 @@ def test_continuous_windows():
             clock[0] = opening + timedelta(minutes=2)
             return {}
         raise KeyboardInterrupt
+    original_report = r.report_daily_bookings
+    def report(*args, **kwargs):
+        report_times.append(clock[0])
+        if report_error:
+            raise report_error
+        return original_report(*args, **kwargs)
     with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
             patch.object(r, 'now', side_effect=lambda: clock[0]), patch.object(r, 'wait_until', side_effect=wait), \
             patch.object(r, 'Client', return_value=client), patch.object(r, 'book_available', return_value=True), \
-            patch.object(r, 'poll', side_effect=poll):
+            patch.object(r, 'poll', side_effect=poll), \
+            patch.object(r, 'report_daily_bookings', side_effect=report) as daily_report:
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
                     log_file=Path(directory)/'continuous.log')
         try:
@@ -432,44 +439,15 @@ def test_continuous_windows():
         datetime(2026, 9, 18, 6, 55, tzinfo=r.SHANGHAI),
         datetime(2026, 9, 18, 6, 57, tzinfo=r.SHANGHAI),
     ], waits
+    assert report_times == [opening + timedelta(minutes=5)], report_times
+    daily_report.assert_called_once_with(client, date(2026, 9, 19), calendar,
+                                         target_periods={3892, 3893})
+    if isinstance(report_error, (r.SessionExpired, r.BrowserUnavailable)):
+        client.recover.assert_called_once()
+    else:
+        client.recover.assert_not_called()
+    client.submit.assert_not_called()
     client.http.close.assert_called_once()
-
-
-def test_timeout_retry_cadence():
-    """核实后不额外退避；另一时段最近的提交仍约束补发时间。"""
-    calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
-    day = date(2026, 9, 17)
-    for targets in ({3892}, {3892, 3893}):
-        client, verifier = Mock(), Mock()
-        calls, records, verified_at = [], [], []
-
-        def audit(event, **fields):
-            if event == 'timeout_retry':
-                verified_at.append(time.monotonic())
-
-        def submit(payload):
-            target = json.loads(payload['data'])[0]['period'][0]['period_id']
-            calls.append((target, time.monotonic()))
-            if len(calls) == 1:
-                time.sleep(.35 if len(targets) == 1 else .01)
-                raise requests.Timeout('response lost')
-            records.append({'id': target, 'group_id': 1029, 'status': 3,
-                            'detail': {str(day): [{'period_id': target, 'is_cancel': 0}]}})
-            return {'e': 'OK'}
-
-        client.mine.side_effect = verifier.mine.side_effect = lambda: copy.deepcopy(records)
-        client.fork.side_effect = lambda: Mock(submit=Mock(side_effect=submit))
-        with patch.object(r, 'log'), patch.object(r, 'audit', side_effect=audit), \
-             patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .3), \
-             patch.object(r, 'VERIFY_INTERVAL_SECONDS', .015 if len(targets) == 1 else .12):
-            result = r.poll(client, day, r.now()+r.timedelta(seconds=2), calendar=calendar, own=[],
-                            target_periods=targets, verifier_factory=lambda c: verifier)
-        assert set(result) == targets and len(verified_at) == 1, (targets, result, calls)
-        assert all(b[1]-a[1] >= .29 for a, b in zip(calls, calls[1:])), calls
-        if len(targets) == 1:
-            assert len(calls) == 2 and 0 <= calls[1][1]-verified_at[0] < .15, calls
-        else:
-            assert [target for target, _ in calls] == [3892, 3893, 3892], calls
 
 
 def test_daily_report():
@@ -481,9 +459,12 @@ def test_daily_report():
     client.mine.return_value = [record]
     with patch.object(r, 'log') as log, patch.object(r, 'audit') as audit:
         report = r.report_daily_bookings(client, day, calendar, target_periods={3892, 3893})
-    assert report == {'18:00-19:00': '已预约', '19:00-20:00': '未查到预约'}, report
-    assert '07:05预约汇报' in log.call_args.args[0]
-    audit.assert_called_once_with('daily_report', day=str(day), periods=report)
+        assert report == {'18:00-19:00': '已预约', '19:00-20:00': '未查到预约'}, report
+        assert '07:05预约汇报' in log.call_args.args[0]
+        audit.assert_called_once_with('daily_report', day=str(day), periods=report)
+        assert r.report_daily_bookings(client, day, calendar, target_periods={3893}) == {
+            '19:00-20:00': '未查到预约'}
+    client.submit.assert_not_called()
 
 
 def check():
@@ -526,7 +507,8 @@ def check():
     test_early_preparation()
     test_startup_availability()
     test_continuous_windows()
-    test_timeout_retry_cadence()
+    test_continuous_windows(r.SessionExpired('expired during daily report'))
+    test_continuous_windows(r.TransientError('HTTP 503'))
     test_daily_report()
 
     with TemporaryDirectory() as tmp, patch.object(r, 'LOCAL', Path(tmp)), \
@@ -583,7 +565,7 @@ def check():
                 with call_lock:
                     calls.append(payload)
                     attempt = len(calls)
-                if kind == 'timeout_always' or (kind == 'timeout' and attempt == 1):
+                if kind == 'timeout' and attempt == 1:
                     raise requests.Timeout()
                 if kind == 'server_error':
                     raise r.TransientError('HTTP 503')
@@ -619,7 +601,7 @@ def check():
                 return worker
             fake.fork.side_effect = fork
             # Keep compressed functional tests above Windows' scheduler granularity.
-            with patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .04), patch.object(r, 'VERIFY_INTERVAL_SECONDS', .005), \
+            with patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .04), patch.object(r, 'RETRY_DELAY_SECONDS', .04), patch.object(r, 'VERIFY_INTERVAL_SECONDS', .005), \
                  patch.object(r, 'slide_solver', lambda client: solver):
                 result = r.poll(fake, day, opening+r.timedelta(seconds=.7), calendar=calendar, own=[], anti_bot=anti_bot,
                                 opening=opening,
@@ -639,11 +621,8 @@ def check():
         for kind in ('normal', 'timeout', 'concurrent', 'captcha', 'quota', 'unconfirmed'):
             calls, result = run(kind)
             assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS, (kind, len(calls))
-            expected = 2 if kind == 'timeout' else (0 if kind in ('quota', 'unconfirmed') else 2)
+            expected = 0 if kind in ('quota', 'unconfirmed') else 2
             assert len(result) == expected, (kind, len(result))
-        calls, result = run('timeout_always')
-        assert len(calls) == 2 * (1 + r.TIMEOUT_RETRY_LIMIT), (len(calls), r.TIMEOUT_RETRY_LIMIT)
-        assert not result
         calls, result = run('captcha_forever')
         assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
         # anti_bot=0：不带验证码也不求解；若服务端中途要验证码，自动切换成携带滑块重试。
@@ -694,4 +673,6 @@ def check():
           'subset dispatch, continuous release windows, one-shot startup attempt, startup recovery/fallback')
 
 
-if __name__=='__main__':check()
+if __name__=='__main__':
+    with patch.object(r, 'FIRST_PAIR_GAP_SECONDS', .08):
+        check()

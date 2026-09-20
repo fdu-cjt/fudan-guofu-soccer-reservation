@@ -114,7 +114,7 @@ class Client:
                 request, settings = prepared
                 if request.url != API + path or request.method != method or kwargs:
                     raise ValueError("Prepared request mismatch")
-                response = self.http.send(request, timeout=(3.05, 8), allow_redirects=False, **settings)
+                response = self.http.send(request, timeout=5, allow_redirects=False, **settings)
         except requests.RequestException as exc:
             self.auditor("http_error", path=path, method=method, error=type(exc).__name__, elapsed_ms=round((time.perf_counter()-started)*1000, 1))
             raise
