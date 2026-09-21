@@ -252,8 +252,13 @@ class Client:
         config = info["config"]
         if config.get("view_type") != "week_calendar_auto":
             raise RuntimeError("场地分配方式变化，停止。")
-        if not info["usable"] or info.get("limit_info"):
-            raise RuntimeError(info.get("limit_info") or "当前账号无预约权限。")
+        limit_info = info.get("limit_info")
+        if isinstance(limit_info, dict):
+            has_limit = bool(limit_info.get("error") or limit_info.get("reason"))
+        else:
+            has_limit = bool(limit_info)
+        if not info["usable"] or has_limit:
+            raise RuntimeError(limit_info or "当前账号无预约权限。")
         self.auditor("verification_config", stage="reservation", anti_bot=config["anti_bot"])
         if config["anti_bot"] == 2:
             raise RuntimeError("场地要求短信/学校微信验证码（anti_bot=2），无法自动完成，请人工处理。")
@@ -304,11 +309,11 @@ def own_slot(records, day, period_id, resource_id=None):
     for record in records:
         # is_cancel=1 means the user may cancel the reservation; it does not
         # mean that the reservation itself is canceled. Status 0 is canceled.
-        if record["group_id"] != RESOURCE or record["status"] in {-1, 0}:
+        if record.get("group_id") != RESOURCE or record.get("status") in {-1, 0}:
             continue
-        if resource_id is not None and record["resource_id"] != resource_id:
+        if resource_id is not None and record.get("resource_id") != resource_id:
             continue
-        for slot in record["detail"].get(day, []):
+        for slot in (record.get("detail") or {}).get(day, []):
             if slot["period_id"] == period_id:
                 return record
     return None
