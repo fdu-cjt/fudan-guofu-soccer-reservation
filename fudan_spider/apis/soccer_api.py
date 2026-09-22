@@ -75,18 +75,6 @@ def _noop_audit(_event, **_fields):
     pass
 
 
-def _redact_records(value, key=""):
-    """Keep diagnostic response structure while removing credential-like fields."""
-    sensitive = ("password", "phone", "mobile", "cookie", "token", "secret")
-    if any(word in key.lower() for word in sensitive):
-        return "<redacted>"
-    if isinstance(value, dict):
-        return {str(k): _redact_records(v, str(k)) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_records(item, key) for item in value]
-    return value
-
-
 class Client:
     def __init__(self, state_path=STATE, user=None, password=None, phone=None,
                  browser=None, logger=None, auditor=None):
@@ -307,7 +295,7 @@ class Client:
                 raise RuntimeError("本人预约列表不完整。")
             page += 1
         if audit_records:
-            self.auditor("appointment_records", records=_redact_records(records))
+            self.auditor("appointment_records", records=records)
         return records
 
     def prepare_submission(self, payload):
