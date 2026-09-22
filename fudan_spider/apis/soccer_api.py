@@ -313,7 +313,14 @@ def own_slot(records, day, period_id, resource_id=None):
             continue
         if resource_id is not None and record.get("resource_id") != resource_id:
             continue
-        for slot in (record.get("detail") or {}).get(day, []):
+        detail = record.get("detail") or {}
+        slots = detail.get(day, [])
+        if not slots:
+            record_day = record.get("date") or record.get("day") or record.get("appointment_date")
+            record_period = record.get("period_id") or record.get("periodId")
+            if str(record_day) == str(day) and record_period is not None:
+                slots = [{"period_id": record_period}]
+        for slot in slots:
             if slot["period_id"] == period_id:
                 return record
     return None

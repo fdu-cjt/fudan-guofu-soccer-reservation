@@ -1025,7 +1025,9 @@ def run(args, continuous=True):
             first_cycle = False
             next_opening = next_window(opening + timedelta(minutes=5))[0]
             audit("window_complete", next_opening=next_opening.isoformat())
-            wait_until(next_opening - timedelta(minutes=5))
+            next_preparation = next_opening - timedelta(minutes=5)
+            log(f"本轮预约完成；明天 {next_preparation:%Y-%m-%d %H:%M} 开始准备，{next_opening:%H:%M} 继续提交预约。")
+            wait_until(next_preparation)
     except BaseException as exc:
         audit("run_error", error=type(exc).__name__)
         raise
