@@ -199,7 +199,7 @@ def available_slots(calendar, own, current, slot_numbers=None):
 
 def report_daily_bookings(client, day, calendar, target_periods=None):
     """At 07:05, report the selected periods found in the user's bookings."""
-    records = client.mine()
+    records = client.mine(audit_records=True)
     periods = calendar_periods(calendar)
     if target_periods is not None:
         periods = [period for period in periods if period["id"] in target_periods]

@@ -75,6 +75,18 @@ def _noop_audit(_event, **_fields):
     pass
 
 
+def _redact_records(value, key=""):
+    """Keep diagnostic response structure while removing credential-like fields."""
+    sensitive = ("password", "phone", "mobile", "cookie", "token", "secret")
+    if any(word in key.lower() for word in sensitive):
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {str(k): _redact_records(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_records(item, key) for item in value]
+    return value
+
+
 class Client:
     def __init__(self, state_path=STATE, user=None, password=None, phone=None,
                  browser=None, logger=None, auditor=None):
@@ -280,7 +292,7 @@ class Client:
         return self.data("/site/resource/calendar", params={"id":RESOURCE,"collective":0,
                          "date":json.dumps({"start_date":day.isoformat(),"end_date":(end_day or day).isoformat()})})
 
-    def mine(self):
+    def mine(self, audit_records=False):
         records, page, seen = [], 1, set()
         while True:
             result = self.data("/site/appointment/appointment-list", params={"p":page,"pageSize":100})
@@ -290,10 +302,13 @@ class Client:
                 seen.add(record["id"])
                 records.append(record)
             if len(records) == int(result["total"]):
-                return records
+                break
             if not result["data"] or len(records) > int(result["total"]):
                 raise RuntimeError("本人预约列表不完整。")
             page += 1
+        if audit_records:
+            self.auditor("appointment_records", records=_redact_records(records))
+        return records
 
     def prepare_submission(self, payload):
         request = self.http.prepare_request(requests.Request("POST", API + "/site/resource/launch",
