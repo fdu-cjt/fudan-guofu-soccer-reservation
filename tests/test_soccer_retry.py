@@ -81,7 +81,9 @@ def check():
         if mode in ('early','service'):
             assert [t for t,_ in calls] == [3892,3893,3892,3893,3892,3893],calls
         if mode=='timeout':
-            assert calls[2][0]==3892 and calls[2][1]-ends[(3892,1)]<.06,calls
+            assert calls[2][0]==3892 and calls[2][1]>=ends[(3892,1)],calls
+            assert any(e['event']=='retry_scheduled' and e['targets']==[3892] and e['delay']==0
+                       for e in r.RUN_EVENTS),r.RUN_EVENTS
         if mode in ('ok','full'):
             assert counts[3892]==1,calls
         if mode=='ok':
