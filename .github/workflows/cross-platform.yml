@@ -1,0 +1,23 @@
+name: macOS browser check
+
+on:
+  pull_request:
+
+jobs:
+  browser:
+    runs-on: macos-15
+    env:
+      UV_PYTHON: '3.12'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - run: uv python install 3.12
+      - run: uv sync --locked
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx playwright install chrome
+      - run: uv run --locked python -B tests/test_soccer.py
+      - run: uv run --locked python -B tests/test_soccer_retry.py
+      - run: uv run --locked python -B tests/test_soccer_browser.py
