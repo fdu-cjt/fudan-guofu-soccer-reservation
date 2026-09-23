@@ -367,6 +367,23 @@ async function login({ user, password, deadlineMs }) {
   throw new Error('Browser login not completed; last HTTP=' + (lastStatus ?? 'none') + '; credentials submitted=' + submitted);
 }
 
+async function confirmNotice(currentPage, deadlineMs) {
+  const remaining = () => Math.max(1, Math.min(65000, (deadlineMs ?? Date.now() + 65000) - Date.now()));
+  const notice = currentPage.locator('.introduce_ref1:visible').first();
+  await notice.waitFor({ timeout: Math.min(10000, remaining()) });
+  const content = (await notice.innerText()).trim();
+  if (!content) throw new Error('预约须知内容为空，未自动确认');
+  const confirm = currentPage.getByRole('button', { name: /^(?:\d+s后确定|确定)$/ }).first();
+  const responsePromise = currentPage.waitForResponse(response =>
+    new URL(response.url()).pathname.endsWith('/site/readDescription') &&
+    response.request().method() === 'POST', { timeout: remaining() });
+  const [response] = await Promise.all([responsePromise, confirm.click({ timeout: remaining() })]);
+  const result = await response.json();
+  if (response.status() !== 200 || result.e !== 'OK')
+    throw new Error('官网未确认预约须知');
+  return { confirmed: true, characters: content.length };
+}
+
 async function handle(command) {
   switch (command.op) {
     case 'start': {
@@ -405,6 +422,13 @@ async function handle(command) {
       return { ready: true, version: browser.version(), readOnly };
     }
     case 'login': return login(command);
+    case 'confirmNotice': {
+      const current = page && !page.isClosed() ? new URL(page.url()) : null;
+      if (!browser?.isConnected() || !current || current.origin !== BASE ||
+          current.pathname !== '/reservation/fe/site/reservationInfo' || current.searchParams.get('id') !== '1029')
+        throw Object.assign(new Error('Browser left booking page'), { code: 'BROWSER_UNAVAILABLE' });
+      return confirmNotice(page, command.deadlineMs);
+    }
     case 'fetch': return fetchInPage(command);
     case 'diagnostics': {
       const cookies = await context.cookies(BASE);
@@ -454,4 +478,4 @@ input.on('line', line => {
 });
 input.on('close', shutdown);
 }
-module.exports = { browserFetch, withTimeout, findChrome, killStaleForProfile, terminateChromeChild };
+module.exports = { browserFetch, confirmNotice, withTimeout, findChrome, killStaleForProfile, terminateChromeChild };

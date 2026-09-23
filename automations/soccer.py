@@ -21,7 +21,7 @@ from soccer_browser import BrowserBridge, BrowserSession, BrowserUnavailable, Su
 from fudan_spider.apis.soccer_api import (
     API, BASE, CREDENTIALS, DEFAULT_LOG_PATH, IDP, LOCAL, PAGE, PASSWORD,
     PHONE, RESOURCE, SSO, STATE, USER, VENUE,
-    AccessBlocked, Client as _SoccerClient, SessionExpired, TransientError,
+    AccessBlocked, Client as _SoccerClient, NoticeUnread, SessionExpired, TransientError,
     calendar_periods, make_payload, own_slot, slide_solver,
 )
 from fudan_spider.utils import SHANGHAI, git_version, load_env_file
@@ -946,6 +946,7 @@ def run(args, continuous=True):
             startup = first_cycle and not preview
             prepared = False
             preparation_failures = 0
+            notice_attempted = False
             while now() < deadline:
                 try:
                     new_client = client is None
@@ -982,6 +983,14 @@ def run(args, continuous=True):
                         continue
                     prepared = True
                     break
+                except NoticeUnread as exc:
+                    if browser is None or notice_attempted:
+                        raise
+                    notice_attempted = True
+                    log("检测到未阅读预约须知，使用官网页面完成阅读和确认。")
+                    result = browser.call("confirmNotice", timeout=70,
+                                          deadlineMs=deadline.timestamp() * 1000)
+                    audit("notice_confirmed", characters=result["characters"])
                 except AccessBlocked:
                     raise
                 except TransientError as exc:

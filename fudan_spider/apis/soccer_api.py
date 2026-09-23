@@ -43,6 +43,10 @@ class AccessBlocked(RuntimeError):
     """服务端拒绝自动访问：停止提交，避免把防护响应当成登录失效反复恢复。"""
 
 
+class NoticeUnread(RuntimeError):
+    """账号尚未在官网确认预约须知。"""
+
+
 class TransientError(RuntimeError):
     """服务端临时故障；5xx 可退避重试，429 由调度层暂停本轮。"""
 
@@ -273,7 +277,7 @@ class Client:
         if not any(r.get("class")=="RangeRule" and r.get("time")==2 and r.get("format")=="day" for r in config["rule"]):
             raise RuntimeError("提前两天的规则发生变化，请重新核对目标日期。")
         if not info["read_description"]:
-            raise RuntimeError("新平台要求先阅读预约须知，请在官网完成。")
+            raise NoticeUnread("新平台要求先阅读预约须知，请在官网完成。")
         return info
 
     def calendar(self, day, end_day=None):

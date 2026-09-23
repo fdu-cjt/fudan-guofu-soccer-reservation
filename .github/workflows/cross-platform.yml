@@ -2,6 +2,8 @@ name: macOS browser check
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
   browser:

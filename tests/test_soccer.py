@@ -310,6 +310,27 @@ def test_early_preparation():
         assert poll.call_args.kwargs['opening'] == datetime(2026,9,17,7,0,0,100000,tzinfo=r.SHANGHAI)
 
 
+def test_notice_confirm_without_relogin():
+    client = Mock(user='test')
+    client.browser.info = {'ready': True}
+    client.browser.call.return_value = {'confirmed': True, 'characters': 42}
+    client.data.return_value = {'number': 'test'}
+    client.settings.side_effect = [r.NoticeUnread('请先阅读预约须知'),
+                                   {'config': {'anti_bot': 0}}]
+    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), \
+            patch.object(r, 'log'), patch.object(r, 'Client', return_value=client), \
+            patch.object(r, 'BrowserBridge', return_value=client.browser), patch.object(r, 'poll'):
+        args = Mock(check=True, dry_run=False, transport='browser', watch_seconds=0,
+                    close_browser=True, log_file=Path(directory) / 'notice.log')
+        r.run(args)
+    client.login.assert_called_once()
+    client.recover.assert_not_called()
+    assert client.data.call_count == 1
+    assert client.settings.call_count == 2
+    client.browser.call.assert_called_once()
+    assert client.browser.call.call_args.args == ('confirmNotice',)
+
+
 def test_startup_availability():
     calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     current = datetime(2026, 9, 16, 18, 30, tzinfo=r.SHANGHAI)
@@ -509,6 +530,7 @@ def check():
     test_second_instance_keeps_log()
     test_browser_hold()
     test_early_preparation()
+    test_notice_confirm_without_relogin()
     test_startup_availability()
     test_continuous_windows()
     test_continuous_windows(r.SessionExpired('expired during daily report'))

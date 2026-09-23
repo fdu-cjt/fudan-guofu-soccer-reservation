@@ -21,7 +21,7 @@ from soccer_browser import BrowserBridge, BrowserSession, BrowserUnavailable
 # same browserFetch function used in production, including the deadline check.
 LOCAL_BROWSER = r'''
 const {chromium} = require('playwright');
-const {browserFetch} = require('./soccer_browser.cjs');
+const {browserFetch, confirmNotice} = require('./soccer_browser.cjs');
 const http = require('node:http');
 const readline = require('node:readline');
 let browser, page, server, origin, active=0, peak=0, posts=0;
@@ -30,6 +30,9 @@ async function handle(c) {
   if(c.op==='start') {
     server=http.createServer((req,res)=>{
       if(req.url==='/') {res.end('<html><body>Local timing check</body></html>'); return;}
+      if(req.url==='/site/readDescription' && req.method==='POST') {
+        res.setHeader('content-type','application/json');res.end('{"e":"OK"}');return;
+      }
       const post=req.method==='POST';
       if(post) {posts++; active++; peak=Math.max(peak,active); output({event:'progress',stage:'local_arrival',atMs:Date.now()});}
       req.resume();
@@ -48,6 +51,12 @@ async function handle(c) {
     if(c.evaluationDelayMs) await new Promise(resolve=>setTimeout(resolve,c.evaluationDelayMs));
     c.url=origin+new URL(c.url).pathname;
     return page.evaluate(browserFetch,c);
+  }
+  if(c.op==='noticeFixture') {
+    await page.setContent('<div class="introduce_ref1">场地预约须知测试内容</div><button id="confirm" disabled>1s后确定</button><script>setTimeout(()=>{const b=document.querySelector("#confirm");b.disabled=false;b.textContent="确定"},150);document.querySelector("#confirm").onclick=()=>fetch("/site/readDescription",{method:"POST"})</script>');
+    const started=Date.now();
+    const result=await confirmNotice(page,Date.now()+5000);
+    return {...result,elapsedMs:Date.now()-started};
   }
   if(c.op==='stats')return {posts,peak};
   if(c.op==='close'){await browser.close();server.close();return {closed:true};}
@@ -72,6 +81,9 @@ def benchmark():
         bridge = BrowserBridge(read_only=False, on_event=on_event)
         client = r.Client(user='test', password='unused', browser=bridge)
         try:
+            notice = bridge.call('noticeFixture', timeout=10)
+            assert notice['confirmed'] and notice['characters'] > 0
+            assert notice['elapsedMs'] >= 100, notice
             # A request valid in Python but delayed past its cutoff must never reach the server.
             result = bridge.call('fetch', url=r.API+'/site/resource/launch', method='POST',
                 body='test', headers={}, timeoutMs=1000, openingMs=time.time()*1000-1000,

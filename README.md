@@ -71,6 +71,8 @@ uv run --locked python -m automations.soccer --time 1
 uv run --locked python -m automations.soccer --time 2
 ```
 
+首次使用场地时，默认的浏览器模式会按官网页面的倒计时阅读并确认预约须知，然后重新检查状态。`--check` 不提交预约，但首次运行可能会在官网确认须知。使用 `--transport http` 时需先在官网手动完成确认。
+
 macOS 上需要防止电脑休眠时，可以使用：
 
 ```bash
