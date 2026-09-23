@@ -18,4 +18,6 @@ jobs:
       - run: uv sync --locked
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npx playwright install chrome
+      - run: uv run --locked python -B tests/test_soccer.py
+      - run: uv run --locked python -B tests/test_soccer_retry.py
       - run: uv run --locked python -B tests/test_soccer_browser.py

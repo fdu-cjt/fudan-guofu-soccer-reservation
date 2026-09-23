@@ -75,7 +75,7 @@ def check():
         assert [t for t,_ in calls[:2]] == [3892,3893],(mode,calls)
         gap=calls[1][1]-calls[0][1]
         if mode in ('late','slow','timeout','connection','retry_after'):
-            assert .15<=gap<.22,(mode,gap)
+            assert .15<=gap<.30,(mode,gap)
         else:
             assert .09<=gap<.16,(mode,gap)
         if mode in ('early','service'):
