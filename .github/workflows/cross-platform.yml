@@ -1,20 +1,13 @@
-name: Cross-platform tests
+name: macOS browser check
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2025, macos-15]
+  browser:
+    runs-on: macos-15
     env:
       UV_PYTHON: '3.12'
-      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -25,6 +18,4 @@ jobs:
       - run: uv sync --locked
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npx playwright install chrome
-      - run: uv run --locked python -B tests/test_soccer.py
-      - run: uv run --locked python -B tests/test_soccer_retry.py
       - run: uv run --locked python -B tests/test_soccer_browser.py

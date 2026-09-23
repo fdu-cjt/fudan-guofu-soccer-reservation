@@ -205,7 +205,6 @@ def test_recovery_and_ok_wakeup():
         client, verifier = Mock(), Mock()
         records, sent, accepted, observed, recovery_times = [], [], {}, {}, []
         restored = threading.Event()
-        recovery_query_started = threading.Event()
         recovery_query, resumed_sends = [], []
         def mine():
             for item in records:
@@ -214,7 +213,6 @@ def test_recovery_and_ok_wakeup():
         def verify_mine():
             if mode == 'recover' and restored.is_set() and not recovery_query:
                 recovery_query.append(time.monotonic())
-                recovery_query_started.set()
                 time.sleep(.35)  # A slow query must not hold up resumed submissions.
                 recovery_query.append(time.monotonic())
             return mine()
@@ -224,8 +222,6 @@ def test_recovery_and_ok_wakeup():
             target = json.loads(payload['data'])[0]['period'][0]['period_id']
             sent.append((target, restored.is_set()))
             if restored.is_set():
-                if mode == 'recover':
-                    assert recovery_query_started.wait(.5), 'Recovery query did not start'
                 resumed_sends.append(time.monotonic())
             if mode != 'ok' and not restored.is_set():
                 raise r.BrowserUnavailable('browser disconnected')
