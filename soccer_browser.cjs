@@ -14,6 +14,8 @@ const progress = fields => process.stdout.write(JSON.stringify({ event: 'progres
 
 // Preserve the separately launched Chrome + CDP path verified by the login logs.
 const CHROME_CANDIDATES = [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
@@ -75,34 +77,127 @@ async function withTimeout(promise, ms) {
 
 // 退出时必须回收整个 Chrome 进程树：只关闭 CDP 连接不会结束浏览器，
 // 残留进程会一直占着 --user-data-dir，导致下一次运行起不来调试端口。
+function terminateChromeChild(child) {
+  if (!child || !child.pid || child.exitCode !== null) {
+    return Promise.resolve();
+  }
+
+  // Windows: 保留原来的 taskkill
+  if (process.platform === 'win32') {
+    return withTimeout(new Promise(resolve => {
+      const killer = spawn(
+        'taskkill',
+        ['/pid', String(child.pid), '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true }
+      );
+      killer.on('exit', resolve);
+      killer.on('error', resolve);
+    }), 5000);
+  }
+
+  // macOS / Linux: detached:true 时 Chrome 是独立进程组
+  return withTimeout(new Promise(resolve => {
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+    } catch {
+      try {
+        process.kill(child.pid, 'SIGTERM');
+      } catch {}
+    }
+
+    setTimeout(() => {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(child.pid, 'SIGKILL');
+        } catch {}
+      }
+
+      resolve();
+    }, 500);
+  }), 2000);
+}
+
 function killChromeTree() {
   const child = chromeProcess;
   chromeProcess = null;
-  if (!child || !child.pid || child.exitCode !== null) return Promise.resolve();
-  return withTimeout(new Promise(resolve => {
-    const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    killer.on('exit', resolve);
-    killer.on('error', resolve);
-  }), 5000);
+  return terminateChromeChild(child);
 }
 
 // 上一次运行崩溃后可能留下占着同一配置目录的 Chrome，回收它以自愈。
-function killStaleForProfile(profile) {
-  // The owner record can be stale or overwritten after a failed launch. The
-  // dedicated profile is the reliable boundary: never touch a browser that
-  // does not carry this exact --user-data-dir argument.
-  const script = `
-    $escaped = [regex]::Escape([string]$env:SOCCER_PROFILE)
-    $pattern = '(?:^|\\s)(?:"--user-data-dir=' + $escaped + '"|--user-data-dir="' + $escaped + '"|--user-data-dir=' + $escaped + ')(?=\\s|$)'
-    Get-CimInstance Win32_Process |
-      Where-Object { $_.Name -in @('chrome.exe', 'msedge.exe') -and $_.CommandLine -and $_.CommandLine -match $pattern } |
-      ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }`;
-  return withTimeout(new Promise(resolve => {
-    const killer = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { stdio: 'ignore', windowsHide: true, env: { ...process.env, SOCCER_PROFILE: profile } });
-    killer.on('exit', resolve);
-    killer.on('error', resolve);
-  }), 5000);
+async function killStaleForProfile(profile) {
+  if (process.platform === 'win32') {
+    // The owner record can be stale or overwritten after a failed launch. The
+    // dedicated profile is the reliable boundary on Windows: never touch a
+    // browser that does not carry this exact --user-data-dir argument.
+    const script = `
+      $escaped = [regex]::Escape([string]$env:SOCCER_PROFILE)
+      $pattern = '(?:^|\\s)(?:"--user-data-dir=' + $escaped + '"|--user-data-dir="' + $escaped + '"|--user-data-dir=' + $escaped + ')(?=\\s|$)'
+      Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -in @('chrome.exe', 'msedge.exe') -and $_.CommandLine -and $_.CommandLine -match $pattern } |
+        ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F *> $null }`;
+    return withTimeout(new Promise(resolve => {
+      const killer = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
+        { stdio: 'ignore', windowsHide: true, env: { ...process.env, SOCCER_PROFILE: profile } });
+      killer.on('exit', resolve);
+      killer.on('error', resolve);
+    }), 5000);
+  }
+
+  const ownerPath = path.join(profile, '.soccer-owner.json');
+  if (!fs.existsSync(ownerPath)) return;
+  let owner;
+  try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); }
+  catch { return; }
+  if (owner.profile !== profile || !owner.pid) return;
+
+  // macOS/Linux: verify the recorded PID still belongs to the exact browser,
+  // profile and debugging port before sending a signal.
+  const command = await withTimeout(
+    new Promise(resolve => {
+      const ps = spawn(
+        'ps',
+        ['-p', String(owner.pid), '-o', 'command='],
+        { stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+
+      let output = '';
+
+      ps.stdout.on('data', chunk => {
+        output += chunk.toString();
+      });
+
+      ps.on('error', () => resolve(''));
+      ps.on('close', () => resolve(output.trim()));
+    }),
+    2000
+  );
+
+  if (!command) {
+    return;
+  }
+
+  const sameExecutable =
+    owner.executable && command.includes(owner.executable);
+
+  const sameProfile =
+    owner.profile && command.includes(owner.profile);
+
+  const samePort =
+    command.includes('--remote-debugging-port=' + owner.port);
+
+  if (!sameExecutable || !sameProfile || !samePort) {
+    return;
+  }
+
+  try {
+    process.kill(-Number(owner.pid), 'SIGTERM');
+  } catch {
+    try {
+      process.kill(Number(owner.pid), 'SIGTERM');
+    } catch {}
+  }
 }
 
 // Keep browser diagnostics out of the JSON protocol stream.
@@ -340,4 +435,4 @@ input.on('line', line => {
 });
 input.on('close', shutdown);
 }
-module.exports = { browserFetch, withTimeout };
+module.exports = { browserFetch, withTimeout, findChrome, killStaleForProfile, terminateChromeChild };

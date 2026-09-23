@@ -1,6 +1,7 @@
 """Thread-safe Python -> persistent Node Playwright bridge; credentials stay on stdin."""
 import json
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import Future, TimeoutError
@@ -45,7 +46,11 @@ class BrowserBridge:
     def _read(self):
         try:
             for line in self.process.stdout:
-                message = json.loads(line)
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    print("NON_JSON_FROM_BROWSER", file=sys.stderr)
+                    continue
                 if 'event' in message:
                     if self.on_event is not None:
                         self.on_event({k: v for k, v in message.items() if k != 'event'})

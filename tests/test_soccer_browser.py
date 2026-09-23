@@ -5,9 +5,11 @@ import sys
 import time
 import contextlib
 import io
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+import threading
 from unittest.mock import patch
 import requests
 
@@ -142,7 +144,75 @@ for line in sys.stdin:
 '''
 
 
+MACOS_BROWSER_CHECK = r'''
+const assert = require('node:assert/strict');
+const {EventEmitter} = require('node:events');
+const fs = require('node:fs');
+const childProcess = require('node:child_process');
+
+(async () => {
+Object.defineProperty(process, 'platform', {value: 'darwin'});
+const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const profile = '/tmp/soccer-profile';
+const owner = {pid: 4321, profile, executable: chrome, port: 9222};
+const spawnCalls = [];
+const signals = [];
+
+childProcess.spawn = (command, args, options) => {
+  spawnCalls.push({command, args, options});
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  process.nextTick(() => {
+    if (command === 'ps') {
+      child.stdout.emit('data', chrome + ' --user-data-dir=' + profile + ' --remote-debugging-port=9222');
+      child.emit('close', 0);
+    } else {
+      child.emit('error', new Error('unexpected command: ' + command));
+    }
+  });
+  return child;
+};
+process.kill = (pid, signal) => signals.push([pid, signal]);
+
+const browser = require('./soccer_browser.cjs');
+fs.existsSync = value => value === chrome || value === profile + '/.soccer-owner.json';
+fs.readFileSync = () => JSON.stringify(owner);
+assert.equal(browser.findChrome(), chrome);
+await browser.killStaleForProfile(profile);
+assert.equal(spawnCalls[0].command, 'ps');
+assert.deepEqual(signals, [[-4321, 'SIGTERM']]);
+
+await browser.terminateChromeChild({pid: 9876, exitCode: null});
+assert.deepEqual(signals.slice(1), [[-9876, 'SIGTERM'], [-9876, 'SIGKILL']]);
+console.log('PASS: macOS Chrome discovery and process cleanup');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+'''
+
+
+def check_non_json_browser_output():
+    bridge = BrowserBridge.__new__(BrowserBridge)
+    bridge.lock = threading.Lock()
+    future = Future()
+    bridge.pending = {1: future}
+    bridge.on_event = None
+    bridge.process = SimpleNamespace(stdout=io.StringIO(
+        'Chrome diagnostic on stderr redirected by a launcher\n'
+        '{"id":1,"result":{"ready":true}}\n'))
+    bridge._read()
+    assert future.result()['ready'] is True
+
+
+def check_macos_browser_lifecycle():
+    subprocess.run(['node', '-e', MACOS_BROWSER_CHECK], cwd=Path(__file__).resolve().parents[1],
+                   check=True, text=True)
+
+
 def check():
+    check_non_json_browser_output()
+    check_macos_browser_lifecycle()
     popen = subprocess.Popen
     def fake_node(command, **kwargs):
         return popen([sys.executable, '-u', '-c', SERVER], **kwargs)
