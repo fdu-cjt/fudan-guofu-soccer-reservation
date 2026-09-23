@@ -149,6 +149,7 @@ const assert = require('node:assert/strict');
 const {EventEmitter} = require('node:events');
 const fs = require('node:fs');
 const childProcess = require('node:child_process');
+const path = require('node:path');
 
 (async () => {
 Object.defineProperty(process, 'platform', {value: 'darwin'});
@@ -157,6 +158,7 @@ const profile = '/tmp/soccer-profile';
 const owner = {pid: 4321, profile, executable: chrome, port: 9222};
 const spawnCalls = [];
 const signals = [];
+let staleChecks = 0;
 
 childProcess.spawn = (command, args, options) => {
   spawnCalls.push({command, args, options});
@@ -172,14 +174,21 @@ childProcess.spawn = (command, args, options) => {
   });
   return child;
 };
-process.kill = (pid, signal) => signals.push([pid, signal]);
+process.kill = (pid, signal) => {
+  if (signal === 0) {
+    if (pid === -4321 && ++staleChecks < 3) return;
+    throw Object.assign(new Error('process exited'), {code: 'ESRCH'});
+  }
+  signals.push([pid, signal]);
+};
 
 const browser = require('./soccer_browser.cjs');
-fs.existsSync = value => value === chrome || value === profile + '/.soccer-owner.json';
+fs.existsSync = value => value === chrome || value === path.join(profile, '.soccer-owner.json');
 fs.readFileSync = () => JSON.stringify(owner);
-assert.equal(browser.findChrome(), chrome);
+assert.equal(browser.findChrome(), path.resolve(chrome));
 await browser.killStaleForProfile(profile);
 assert.equal(spawnCalls[0].command, 'ps');
+assert.equal(staleChecks, 3);
 assert.deepEqual(signals, [[-4321, 'SIGTERM']]);
 
 await browser.terminateChromeChild({pid: 9876, exitCode: null});

@@ -191,13 +191,32 @@ async function killStaleForProfile(profile) {
     return;
   }
 
+  let target = -Number(owner.pid);
   try {
-    process.kill(-Number(owner.pid), 'SIGTERM');
+    process.kill(target, 'SIGTERM');
   } catch {
-    try {
-      process.kill(Number(owner.pid), 'SIGTERM');
-    } catch {}
+    target = Number(owner.pid);
+    try { process.kill(target, 'SIGTERM'); }
+    catch { return; }
   }
+
+  // Chrome must release this profile before the next launcher uses it.
+  async function waitForExit(ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      try { process.kill(target, 0); }
+      catch (error) {
+        if (error.code === 'ESRCH') return true;
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+  if (await waitForExit(2000)) return;
+  try { process.kill(target, 'SIGKILL'); }
+  catch (error) { if (error.code !== 'ESRCH') throw error; }
+  if (!await waitForExit(1000)) throw new Error('Stale browser did not release its profile');
 }
 
 // Keep browser diagnostics out of the JSON protocol stream.
