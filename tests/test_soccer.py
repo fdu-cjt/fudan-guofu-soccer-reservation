@@ -263,6 +263,54 @@ def test_recovery_and_ok_wakeup():
                 assert all(0 <= observed[p]-accepted[p] < .2 for p in accepted), (observed, accepted)
 
 
+def test_expired_submission_retry():
+    calendar = json.loads((Path(__file__).parent / 'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
+    day = date(2026, 9, 17)
+    for mode in ('single', 'other_ok', 'limit', 'window'):
+        client, verifier = Mock(), Mock()
+        records, sent = [], []
+        restored = threading.Event()
+        client.mine.side_effect = verifier.mine.side_effect = lambda: copy.deepcopy(records)
+        target = 3893 if mode == 'other_ok' else 3892
+        def submit(payload):
+            period = json.loads(payload['data'])[0]['period'][0]['period_id']
+            sent.append((period, r.now()))
+            attempts = sum(p == period for p, _ in sent)
+            if period == target and (attempts == 1 or mode == 'limit'):
+                raise r.SessionExpired('UN_AUTH')
+            if period == target:
+                assert restored.is_set(), 'Must recover login before retrying'
+            records.append({'id': period, 'group_id': 1029, 'status': 3,
+                            'appointment_time': {'groups': [{'dates': [{'date': str(day),
+                                'periods': [{'period_id': period}]}]}]}})
+            return {'e': 'OK'}
+        client.fork.side_effect = lambda: Mock(submit=Mock(side_effect=submit))
+        def recover(deadline):
+            if mode == 'window':
+                time.sleep(.15)  # Login succeeds after the submission window has closed.
+            restored.set()
+        client.recover.side_effect = recover
+        opening = r.now() + r.timedelta(seconds=.03)
+        with patch.object(r, 'log'), patch.object(r, 'SUBMIT_INTERVAL_SECONDS', .04), \
+                patch.object(r, 'RETRY_DELAY_SECONDS', .01), patch.object(r, 'VERIFY_INTERVAL_SECONDS', .01), \
+                patch.object(r, 'MAX_SUBMISSION_ATTEMPTS', 2 if mode == 'limit' else 10), \
+                patch.object(r, 'RETRY_WINDOW_SECONDS', .1 if mode == 'window' else 120):
+            result = r.poll(client, day, opening+r.timedelta(seconds=.8), calendar=calendar, own=[],
+                            opening=opening, target_periods={3892, 3893} if mode == 'other_ok' else {target},
+                            verifier_factory=lambda c: verifier)
+        assert client.recover.called
+        periods = [p for p, _ in sent]
+        if mode in ('single', 'other_ok'):
+            assert periods.count(target) == 2 and target in result, (mode, sent, result)
+            if mode == 'other_ok':
+                assert periods.count(3892) == 1 and 3892 in result, 'Accepted slot must not be resubmitted'
+        elif mode == 'limit':
+            assert len(sent) == 2 and not result, (sent, result)
+        else:
+            assert len(sent) == 1 and not result, (sent, result)
+            assert all(t < opening+r.timedelta(seconds=.1) for _, t in sent)
+
+
 def test_second_instance_keeps_log():
     with TemporaryDirectory() as directory:
         target = Path(directory) / 'running.log'
@@ -562,6 +610,7 @@ def check():
 
     test_parallel_dispatch()
     test_recovery_and_ok_wakeup()
+    test_expired_submission_retry()
     test_second_instance_keeps_log()
     test_browser_hold()
     test_early_preparation()

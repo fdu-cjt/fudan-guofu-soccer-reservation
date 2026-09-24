@@ -552,7 +552,16 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
         except SubmissionSkipped:
             halt_target(target, "浏览器跳过了提交窗口")
             return
-        except (SessionExpired, BrowserUnavailable) as exc:
+        except SessionExpired as exc:
+            # An explicit auth rejection is not an accepted booking awaiting confirmation.
+            with lock:
+                awaiting_verification.discard(target)
+                unknown_targets.discard(target)
+            if epoch == generation:
+                need_recovery(exc)
+            schedule_retry(target, "session_expired")
+            return
+        except BrowserUnavailable as exc:
             with lock:
                 awaiting_verification.add(target)
             if epoch == generation:
