@@ -312,24 +312,42 @@ class Client:
 
 
 
-def own_slot(records, day, period_id, resource_id=None):
+def own_slot(records, day, period_id, resource_id=None, unknown=None):
+    if records is None:
+        if unknown is not None:
+            unknown.append("appointment_list_unavailable")
+        return None
     for record in records:
         # is_cancel=1 means the user may cancel the reservation; it does not
         # mean that the reservation itself is canceled. Status 0 is canceled.
-        if record.get("group_id") != RESOURCE or record.get("status") in {-1, 0}:
+        if record.get("status") in {-1, 0, "-1", "0"}:
+            continue
+        if "group_id" not in record:
+            if unknown is not None:
+                unknown.append(record.get("id"))
+            continue
+        if str(record["group_id"]) != str(RESOURCE):
             continue
         if resource_id is not None and record.get("resource_id") != resource_id:
             continue
-        detail = record.get("detail") or {}
-        slots = detail.get(day, [])
-        if not slots:
-            record_day = record.get("date") or record.get("day") or record.get("appointment_date")
-            record_period = record.get("period_id") or record.get("periodId")
-            if str(record_day) == str(day) and record_period is not None:
-                slots = [{"period_id": record_period}]
-        for slot in slots:
-            if slot["period_id"] == period_id:
-                return record
+        try:
+            groups = record["appointment_time"]["groups"]
+            if not groups:
+                raise ValueError("empty groups")
+            for group in groups:
+                if not group["dates"]:
+                    raise ValueError("empty dates")
+                for appointment_day in group["dates"]:
+                    if not appointment_day["periods"]:
+                        raise ValueError("empty periods")
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(appointment_day["date"])):
+                        raise ValueError("unexpected date")
+                    if appointment_day["date"] == str(day):
+                        if any(str(slot["period_id"]) == str(period_id) for slot in appointment_day["periods"]):
+                            return record
+        except (KeyError, TypeError, ValueError):
+            if unknown is not None:
+                unknown.append(record.get("id"))
     return None
 
 

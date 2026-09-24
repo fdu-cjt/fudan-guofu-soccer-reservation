@@ -30,7 +30,7 @@ CAPTCHA_POOL_SIZE = 2
 SUBMIT_INTERVAL_SECONDS = 1.0
 FIRST_PAIR_GAP_SECONDS = 2.0
 RETRY_WINDOW_SECONDS = 120
-MAX_SUBMISSION_ATTEMPTS = 20
+MAX_SUBMISSION_ATTEMPTS = 10
 RETRY_DELAY_SECONDS = 1.0
 MAX_VERIFICATION_ATTEMPTS = 3
 MAX_RECOVERY_ATTEMPTS = 3
@@ -197,16 +197,34 @@ def available_slots(calendar, own, current, slot_numbers=None):
     return available
 
 
+def read_bookings(client, audit_records=False):
+    """A broken read-only booking list must not prevent a timed submission."""
+    if time.monotonic() < client.__dict__.get("_booking_list_retry_at", 0):
+        return None
+    try:
+        return client.mine(audit_records=True) if audit_records else client.mine()
+    except (SessionExpired, BrowserUnavailable, AccessBlocked):
+        raise
+    except (TransientError, requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, TransientError) and exc.status_code == 429:
+            client._booking_list_retry_at = time.monotonic() + max(60, exc.retry_after or 0)
+        audit("booking_list_unavailable", error=type(exc).__name__, reason=str(exc)[:200])
+        return None
+
+
 def report_daily_bookings(client, day, calendar, target_periods=None):
     """At 07:05, report the selected periods found in the user's bookings."""
-    records = client.mine(audit_records=True)
+    records = read_bookings(client, audit_records=True)
     periods = calendar_periods(calendar)
     if target_periods is not None:
         periods = [period for period in periods if period["id"] in target_periods]
     report = {}
     for period in periods:
-        record = own_slot(records, str(day), period["id"])
-        report[period["str_time"]] = str(record.get("status_name") or "已预约") if record else "未查到预约"
+        unknown = []
+        record = own_slot(records, str(day), period["id"], unknown=unknown)
+        report[period["str_time"]] = (str(record.get("status_name") or "已预约") if record else
+                                      "无法核实：预约列表读取失败" if records is None else
+                                      "无法核实：预约记录格式不识别" if unknown else "未查到预约")
     summary = "；".join(f"{period}：{status}" for period, status in report.items()) or "无目标时段"
     log(f"{day} 07:05预约汇报：{summary}")
     audit("daily_report", day=str(day), periods=report)
@@ -268,7 +286,7 @@ def _soft_rate_limited(exc):
 def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None, opening=None, anti_bot=0,
          verifier_factory=None, target_periods=None):
     calendar = client.calendar(day) if calendar is None else calendar
-    own = client.mine() if own is None else own
+    own = read_bookings(client) if own is None else own
     periods = calendar_periods(calendar)
     fields = calendar["resource"]
     if target_periods is not None:
@@ -293,6 +311,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
     in_flight, awaiting_verification, unknown_targets = set(), set(), set()
     retry_order = [period["id"] for period in periods]
     retry_started = False
+    format_warned = False
     pause_reason = None
     last_submit_at, retry_after = -float("inf"), {}
     submit_gate, next_submit_at = threading.Lock(), -float("inf")
@@ -307,9 +326,14 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             verify_wake.set()
 
     def update(records):
+        nonlocal format_warned
         with lock:
             for period in periods:
-                record = own_slot(records, str(day), period["id"])
+                unknown = []
+                record = own_slot(records, str(day), period["id"], unknown=unknown)
+                if records is not None and unknown and not format_warned:
+                    audit("booking_format_unknown", record_ids=unknown)
+                    format_warned = True
                 if record and period["id"] not in confirmed:
                     confirmed[period["id"]] = str(record.get("status_name") or "已预约")
                     awaiting_verification.discard(period["id"])
@@ -410,7 +434,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
             epoch = generation
             if ready.is_set():
                 try:
-                    update(verifier.mine())
+                    update(read_bookings(verifier))
                     verification_errors = 0
                 except (SessionExpired, BrowserUnavailable) as exc:
                     if epoch == generation:
@@ -779,7 +803,7 @@ def poll(client, day, deadline, commit=True, once=False, calendar=None, own=None
                 awaiting_verification.clear()
         if not access_blocked.is_set():
             try:
-                update(client.mine())
+                update(read_bookings(client))
             except AccessBlocked as exc:
                 audit("final_verification_error", error=type(exc).__name__, reason=str(exc)[:200])
             except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as exc:
@@ -818,7 +842,7 @@ def book_available(client, cutoff, anti_bot, slot_numbers=None):
                         for number in sorted(slot_numbers if slot_numbers is not None else {1, 2}))
     log(f"开始检查已有空位：{current.date()} 至 {end_day}，时段 {selected}。")
     calendar = client.calendar(current.date(), end_day)
-    own = client.mine()
+    own = read_bookings(client)
     candidates = available_slots(calendar, own, now(), slot_numbers=slot_numbers)
     audit("startup_availability", dates={str(day): sorted(ids) for day, ids in candidates.items()})
     if not candidates:
@@ -831,7 +855,7 @@ def book_available(client, cutoff, anti_bot, slot_numbers=None):
         if now() >= cutoff:
             break
         # Recheck each date: earlier attempts may take minutes, and quota can change meanwhile.
-        calendar, own = client.calendar(day), client.mine()
+        calendar, own = client.calendar(day), read_bookings(client)
         targets = available_slots(calendar, own, now(), slot_numbers=slot_numbers).get(day)
         if not targets:
             continue
@@ -922,7 +946,7 @@ def run(args, continuous=True):
     try:
         audit("runtime_version", **git_version())
         load_credentials()
-        log("预约调度：先发A，B在A响应后1秒或首发后2秒较早时发送；请求5秒超时，超时立即参与重试，普通失败冷却1秒；交替发送间隔1秒，合计最多20次。")
+        log("预约调度：先发A，B在A响应后1秒或首发后2秒较早时发送；请求5秒超时，超时立即参与重试，普通失败冷却1秒；交替发送间隔1秒，合计最多10次。")
         slot_numbers = getattr(args, "slot_numbers", None)
         if not isinstance(slot_numbers, (list, tuple, set)):
             slot_numbers = {1, 2}
@@ -976,7 +1000,7 @@ def run(args, continuous=True):
                             log(f"启动空位检查完成；已进入本轮放号准备阶段，放号时间：{opening:%Y-%m-%d %H:%M}。")
                         wait_until(preparation)
                         continue
-                    calendar, own = client.calendar(day), client.mine()
+                    calendar, own = client.calendar(day), read_bookings(client)
                     if not preview and now() < opening-timedelta(minutes=3):
                         audit("preparation", stage="logged_in")
                         wait_until(opening-timedelta(minutes=3))

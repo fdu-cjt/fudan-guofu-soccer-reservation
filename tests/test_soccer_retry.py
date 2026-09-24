@@ -45,7 +45,8 @@ def check():
                         return {'e':'ERROR','m':'已约满'}
                     if mode == 'ok':
                         records.append({'id':target,'group_id':1029,'status':3,
-                                        'detail':{str(day):[{'period_id':target}]}})
+                                        'appointment_time':{'groups':[{'dates':[{'date':str(day),
+                                            'periods':[{'period_id':target}]}]}]}})
                         return {'e':'OK'}
                 if mode == 'retry_after':
                     raise r.TransientError('HTTP 503',503,.2)

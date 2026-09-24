@@ -200,7 +200,8 @@ def test_recovery_and_ok_wakeup():
     day = date(2026, 9, 17)
     def record(period):
         return {'id': period, 'group_id': 1029, 'status': 3,
-                'detail': {str(day): [{'period_id': period, 'is_cancel': 0}]}}
+                'appointment_time': {'groups': [{'dates': [{'date': str(day),
+                    'periods': [{'period_id': period}]}]}]}}
     for mode in ('ok', 'recover', 'deadline'):
         client, verifier = Mock(), Mock()
         records, sent, accepted, observed, recovery_times = [], [], {}, {}, []
@@ -285,12 +286,14 @@ def test_browser_hold():
         prompt.assert_not_called()
 
 
-def test_early_preparation():
+def test_early_preparation(mine_error=None):
     clock = [datetime(2026, 9, 17, 6, 54, tzinfo=r.SHANGHAI)]
     waits = []
     client = Mock(user='test')
     client.settings.return_value = {'config': {'anti_bot': 0}}
     client.data.return_value = {'number': 'test'}
+    if mine_error:
+        client.mine.side_effect = mine_error
     def wait(moment):
         waits.append(moment.strftime('%H:%M'))
         clock[0] = moment
@@ -308,6 +311,8 @@ def test_early_preparation():
         startup.assert_called_once()
         assert poll.call_args.kwargs['opening'].strftime('%H:%M') == '07:00'
         assert poll.call_args.kwargs['opening'] == datetime(2026,9,17,7,0,0,100000,tzinfo=r.SHANGHAI)
+        if mine_error:
+            assert poll.call_args.kwargs['own'] is None
 
 
 def test_notice_confirm_without_relogin():
@@ -341,7 +346,8 @@ def test_startup_availability():
             for cell in periods.values():
                 cell.update(status=0, num='1')
     own = [{'id': 1, 'group_id': 1029, 'status': 3,
-            'detail': {'2026-09-17': [{'period_id': 3892, 'is_cancel': 0}]}}]
+            'appointment_time': {'groups': [{'dates': [{'date': '2026-09-17',
+                'periods': [{'period_id': 3892}]}]}]}}]
     calendar['data']['2026-09-18']['1030']['3893']['status'] = 3
     calendar['data']['2026-09-18']['1031']['3893']['num'] = '0'
     expected = {date(2026,9,16): {3893}, date(2026,9,17): {3893}, date(2026,9,18): {3892}}
@@ -479,7 +485,8 @@ def test_daily_report():
     calendar = json.loads((Path(__file__).parent/'data/soccer-calendar.json').read_text(encoding='utf-8'))['d']
     day = date(2026, 9, 17)
     record = {'id': 3892, 'group_id': 1029, 'status': 3, 'status_name': '已预约',
-              'detail': {str(day): [{'period_id': 3892, 'is_cancel': 0}]}}
+              'appointment_time': {'groups': [{'dates': [{'date': str(day),
+                  'periods': [{'period_id': 3892}]}]}]}}
     client = Mock()
     client.mine.return_value = [record]
     with patch.object(r, 'log') as log, patch.object(r, 'audit') as audit:
@@ -489,10 +496,30 @@ def test_daily_report():
         audit.assert_called_once_with('daily_report', day=str(day), periods=report)
         assert r.report_daily_bookings(client, day, calendar, target_periods={3893}) == {
             '19:00-20:00': '未查到预约'}
+        client.mine.return_value = [{'id':42, 'group_id':1029, 'status':3}]
+        assert r.report_daily_bookings(client, day, calendar, target_periods={3892}) == {
+            '18:00-19:00': '无法核实：预约记录格式不识别'}
+        client.mine.side_effect = ValueError('分页结构变化')
+        assert r.report_daily_bookings(client, day, calendar, target_periods={3892}) == {
+            '18:00-19:00': '无法核实：预约列表读取失败'}
     client.submit.assert_not_called()
 
 
+def test_booking_list_rate_limit_cooldown():
+    client = Mock()
+    client.mine.side_effect = [r.TransientError('HTTP 429', 429), []]
+    with patch.object(r.time, 'monotonic', return_value=100), patch.object(r, 'audit'):
+        assert r.read_bookings(client) is None
+    with patch.object(r.time, 'monotonic', return_value=120):
+        assert r.read_bookings(client) is None
+    assert client.mine.call_count == 1
+    with patch.object(r.time, 'monotonic', return_value=161):
+        assert r.read_bookings(client) == []
+    assert client.mine.call_count == 2
+
+
 def check():
+    assert r.MAX_SUBMISSION_ATTEMPTS == 10
     test_git_version()
     day = date(2026,9,17)
     begin = datetime(2026,9,15,7,tzinfo=r.SHANGHAI)
@@ -506,9 +533,9 @@ def check():
     assert r.selected_period_ids(calendar, {1}) == {3892}
     assert r.selected_period_ids(calendar, {2}) == {3893}
     def record(period, rid=1030):
-        p=next(p for p in calendar['time'] if p['id']==period)
         return {'id':period,'group_id':1029,'resource_id':rid,'status':3,'status_name':'已预约',
-                'detail':{str(day):[{'period_id':period,'is_cancel':0}]}}
+                'appointment_time':{'groups':[{'dates':[{'date':str(day),
+                    'periods':[{'period_id':period}]}]}]}}
     payload=r.make_payload(day,calendar['resource'],calendar['time'][0])
     data=json.loads(payload['data'])
     assert data == [{'group_id':1029,'resource_ids':[1030,1031],
@@ -519,10 +546,18 @@ def check():
     assert json.loads(with_captcha['captcha']) == {'token':'t1','pointJson':'p1'}
     active = copy.deepcopy(record(3892))
     active['is_cancel'] = 1
-    active['detail'][str(day)][0]['is_cancel'] = 1
+    active['appointment_time']['groups'][0]['dates'][0]['periods'][0]['can_cancel'] = 1
     assert r.own_slot([active],str(day),3892) is active
     assert r.own_slot([dict(record(3892),status=0)],str(day),3892) is None
     assert r.own_slot([dict(record(3892),group_id=999)],str(day),3892) is None
+    assert r.own_slot([active],str(day),3893) is None
+    legacy = {'id':43, 'group_id':1029, 'status':3, 'detail':{str(day):[{'period_id':3892}]}}
+    unknown = []
+    assert r.own_slot([legacy],str(day),3892,unknown=unknown) is None
+    assert unknown == [43]
+    unknown = []
+    assert r.own_slot([{'id':42,'group_id':1029,'status':3}],str(day),3892,unknown=unknown) is None
+    assert unknown == [42]
     assert r._submission_kind({'e': 'ERROR', 'm': '点击太频繁了'})[0] == 'retry'
 
     test_parallel_dispatch()
@@ -530,12 +565,15 @@ def check():
     test_second_instance_keeps_log()
     test_browser_hold()
     test_early_preparation()
+    test_early_preparation(ValueError('预约列表分页结构变化'))
+    test_early_preparation(r.TransientError('HTTP 429', 429))
     test_notice_confirm_without_relogin()
     test_startup_availability()
     test_continuous_windows()
     test_continuous_windows(r.SessionExpired('expired during daily report'))
     test_continuous_windows(r.TransientError('HTTP 503'))
     test_daily_report()
+    test_booking_list_rate_limit_cooldown()
 
     with TemporaryDirectory() as tmp, patch.object(r, 'LOCAL', Path(tmp)), \
             patch.object(r, 'DEFAULT_LOG_PATH', Path(tmp) / 'default.log'), patch.object(r, 'log'):
@@ -566,7 +604,7 @@ def check():
             def solve(self):
                 self.count += 1
                 return {'token': f't{self.count}', 'pointJson': 'p'}, 100, 0.3
-        def run(kind, anti_bot=1, verifier_error=None):
+        def run(kind, anti_bot=1, verifier_error=None, persistent_error=False):
             """跑一轮 poll，返回 (提交内容列表, 确认结果)；同时断言核实会话一定被关闭。"""
             fake, verifier = Mock(), Mock()
             solver = FakeSolver()
@@ -578,7 +616,7 @@ def check():
             raised = threading.Event()
             opening = r.now() + r.timedelta(seconds=.03)
             def mine():
-                if verifier_error and not raised.is_set():
+                if verifier_error and (persistent_error or not raised.is_set()):
                     raised.set()      # 只报一次，之后恢复正常，用来验证「不停止」
                     raise verifier_error
                 return copy.deepcopy(own)
@@ -646,11 +684,11 @@ def check():
             return calls, result
         for kind in ('normal', 'timeout', 'concurrent', 'captcha', 'quota', 'unconfirmed'):
             calls, result = run(kind)
-            assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS, (kind, len(calls))
+            assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS, (kind, len(calls))
             expected = 0 if kind in ('quota', 'unconfirmed') else 2
             assert len(result) == expected, (kind, len(result))
         calls, result = run('captcha_forever')
-        assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
+        assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
         # anti_bot=0：不带验证码也不求解；若服务端中途要验证码，自动切换成携带滑块重试。
         calls, result = run('normal', anti_bot=0)
         assert len(calls) == 2 and len(result) == 2, (len(calls), len(result))
@@ -659,32 +697,38 @@ def check():
         assert len(calls) == 3 and len(result) == 2, (len(calls), len(result))
         assert any(json.loads(p['captcha']).get('token') == 't1' for p in calls)
         calls, result = run('busy', anti_bot=0)
-        assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and not result
+        assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS and not result
         calls, result = run('partial', anti_bot=0)
         assert len(result) == 2
         submitted = [json.loads(p['data'])[0]['period'][0]['period_id'] for p in calls]
         assert submitted.count(3892) == 1 and submitted.count(3893) == 3, submitted
         calls, result = run('unknown', anti_bot=0)
-        assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and not result
+        assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS and not result
+        r.RUN_EVENTS.clear()
+        calls, result = run('unconfirmed', anti_bot=0,
+                            verifier_error=ValueError('预约列表结构变化'), persistent_error=True)
+        assert len(calls) == 2 and not result, '提交 OK 后列表读不懂，不应重复提交'
+        assert 'booking_list_unavailable' in {e['event'] for e in r.RUN_EVENTS}
+        assert 'booking_format_unknown' not in {e['event'] for e in r.RUN_EVENTS}
         for kind in ('http429', 'expired', 'malformed'):
             calls, result = run(kind, anti_bot=0)
-            assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and not result, (kind, len(calls))
+            assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS and not result, (kind, len(calls))
         # 提交侧临时故障（5xx）：只退避重试，不能判定本轮失败。
         calls, result = run('server_error')
-        assert 1 <= len(calls) <= 2 * r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
-        # 核实通道遇到 429/5xx/连接错误：继续核实，不准 stop 整轮。
+        assert 1 <= len(calls) <= r.MAX_SUBMISSION_ATTEMPTS and len(result) == 0, (len(calls), len(result))
+        # 核实通道遇到 5xx/连接错误：只读列表不可用也不能阻止继续预约。
         for transient in (r.TransientError('HTTP 503'), requests.ConnectionError('boom')):
             r.RUN_EVENTS.clear()
             calls, result = run('normal', verifier_error=transient)
             events = {e['event'] for e in r.RUN_EVENTS}
             assert len(result) == 2, (transient, len(result))
             assert 'verification_stopped' not in events, (transient, events)
-            assert events & {'verification_retry', 'verification_error'}, (transient, events)
+            assert 'booking_list_unavailable' in events, (transient, events)
         # 核实异常不再停止提交；恢复查询后仍能确认成功。
         r.RUN_EVENTS.clear()
         calls, result = run('normal', verifier_error=RuntimeError('结构变化'))
         assert len(result) == 2
-        assert 'verification_error' in {e['event'] for e in r.RUN_EVENTS}
+        assert 'booking_list_unavailable' in {e['event'] for e in r.RUN_EVENTS}
         assert 'verification_stopped' not in {e['event'] for e in r.RUN_EVENTS}
         fake=Mock()
         r.poll(fake, day, r.now()-r.timedelta(seconds=1), calendar=calendar, own=[])
