@@ -981,7 +981,7 @@ def run(args, continuous=True):
             else:
                 log(f"等待下一次放号准备：{opening:%Y-%m-%d %H:%M}–{deadline:%H:%M}，07:00 进入提交；已预约时段会自动跳过。")
             day = target_day(now().date() if preview else opening.date())
-            startup = first_cycle and not preview and try_existing
+            startup = first_cycle and not preview
             prepared = False
             preparation_failures = 0
             notice_attempted = False
@@ -1004,14 +1004,16 @@ def run(args, continuous=True):
                     info = client.settings()
                     if startup:
                         preparation = opening-timedelta(minutes=5)
-                        book_available(client, preparation if now() < preparation else opening,
-                                       info["config"]["anti_bot"], slot_numbers=slot_numbers)
+                        if try_existing:
+                            book_available(client, preparation if now() < preparation else opening,
+                                           info["config"]["anti_bot"], slot_numbers=slot_numbers)
                         first_cycle = False
                         startup = False
+                        startup_status = "启动空位检查完成" if try_existing else "已跳过启动空位预约"
                         if now() < preparation:
-                            log(f"启动空位检查完成；等待期间不持续扫描空位。下一次准备时间：{preparation:%Y-%m-%d %H:%M}，放号时间：{opening:%Y-%m-%d %H:%M}。")
+                            log(f"{startup_status}；等待期间不持续扫描空位。下一次准备时间：{preparation:%Y-%m-%d %H:%M}，放号时间：{opening:%Y-%m-%d %H:%M}。")
                         else:
-                            log(f"启动空位检查完成；已进入本轮放号准备阶段，放号时间：{opening:%Y-%m-%d %H:%M}。")
+                            log(f"{startup_status}；已进入本轮放号准备阶段，放号时间：{opening:%Y-%m-%d %H:%M}。")
                         wait_until(preparation)
                         continue
                     calendar, own = client.calendar(day), read_bookings(client)

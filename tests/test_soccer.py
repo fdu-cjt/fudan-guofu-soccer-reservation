@@ -334,7 +334,7 @@ def test_browser_hold():
         prompt.assert_not_called()
 
 
-def test_early_preparation(mine_error=None):
+def test_early_preparation(mine_error=None, try_existing=False):
     clock = [datetime(2026, 9, 17, 6, 54, tzinfo=r.SHANGHAI)]
     waits = []
     client = Mock(user='test')
@@ -345,22 +345,30 @@ def test_early_preparation(mine_error=None):
     def wait(moment):
         waits.append(moment.strftime('%H:%M'))
         clock[0] = moment
-    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log'), \
+    with TemporaryDirectory() as directory, patch.object(r, 'load_credentials'), patch.object(r, 'log') as log, \
             patch.object(r, 'now', side_effect=lambda: clock[0]), patch.object(r, 'wait_until', side_effect=wait), \
             patch.object(r, 'Client', return_value=client), patch.object(r, 'poll') as poll, \
             patch.object(r, 'book_available', return_value=False) as startup:
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
-                    log_file=Path(directory)/'prepare.log', try_existing=True)
+                    log_file=Path(directory)/'prepare.log', try_existing=try_existing)
         r.run(args, continuous=False)
         assert waits == ['06:55', '06:57'], waits
         client.login.assert_called_once()
         client.recover.assert_not_called()
         assert client.data.call_count == 2
-        startup.assert_called_once()
+        if try_existing:
+            startup.assert_called_once()
+        else:
+            startup.assert_not_called()
+        assert any('下一次准备时间：2026-09-17 06:55' in call.args[0] for call in log.call_args_list)
         assert poll.call_args.kwargs['opening'].strftime('%H:%M') == '07:00'
         assert poll.call_args.kwargs['opening'] == datetime(2026,9,17,7,0,0,100000,tzinfo=r.SHANGHAI)
         if mine_error:
             assert poll.call_args.kwargs['own'] is None
+
+
+def test_early_preparation_with_existing():
+    test_early_preparation(try_existing=True)
 
 
 def test_notice_confirm_without_relogin():
