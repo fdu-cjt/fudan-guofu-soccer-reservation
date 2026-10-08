@@ -350,7 +350,7 @@ def test_early_preparation(mine_error=None):
             patch.object(r, 'Client', return_value=client), patch.object(r, 'poll') as poll, \
             patch.object(r, 'book_available', return_value=False) as startup:
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
-                    log_file=Path(directory)/'prepare.log')
+                    log_file=Path(directory)/'prepare.log', try_existing=True)
         r.run(args, continuous=False)
         assert waits == ['06:55', '06:57'], waits
         client.login.assert_called_once()
@@ -459,7 +459,7 @@ def test_startup_availability():
             patch.object(r, 'book_available', side_effect=[r.SessionExpired('expired'), True]) as startup, \
             patch.object(r.time, 'sleep'):
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
-                    log_file=Path(directory)/'startup.log')
+                    log_file=Path(directory)/'startup.log', try_existing=True)
         r.run(args, continuous=False)
         assert startup.call_count == 2  # A failed scan is retried, never treated as an empty calendar.
         client.recover.assert_called_once()
@@ -504,7 +504,7 @@ def test_continuous_windows(report_error=None):
             patch.object(r, 'poll', side_effect=poll), \
             patch.object(r, 'report_daily_bookings', side_effect=report) as daily_report:
         args = Mock(check=False, dry_run=False, transport='http', watch_seconds=0,
-                    log_file=Path(directory)/'continuous.log')
+                    log_file=Path(directory)/'continuous.log', try_existing=True)
         try:
             r.run(args)
             assert False, 'test must stop the continuous worker after the second window'

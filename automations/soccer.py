@@ -935,6 +935,8 @@ def main():
     parser.add_argument("--time", dest="slot_numbers", nargs="+", type=int,
                         choices=(1, 2), metavar="N",
                         help="预约时段：1=18:00-19:00，2=19:00-20:00；默认两个都预约。")
+    parser.add_argument("--try-existing", action="store_true",
+                        help="启动时尝试已经开放的空场地；默认跳过，直接等待 07:00 放号。")
     parser.add_argument("--close-browser", action="store_true",
                         help="停止程序后直接关闭 Chrome；默认保留窗口等待手动处理。")
     parser.add_argument("--watch-seconds", type=float, default=0, help="仅用于 --check：每 15 秒并行检查四个只读接口。")
@@ -965,18 +967,21 @@ def run(args, continuous=True):
             f"{number}（{('18:00-19:00' if number == 1 else '19:00-20:00')}）"
             for number in sorted(slot_numbers)))
         preview = args.check or args.dry_run
+        try_existing = getattr(args, "try_existing", False) is True
         first_cycle = True
         must_login = True
         while True:
             opening, deadline = next_window(now())
             if preview:
                 deadline = now() + timedelta(seconds=90)
-            elif first_cycle:
+            elif first_cycle and try_existing:
                 log(f"先检查已开放空位；即使已有预约也继续等待 {opening:%Y-%m-%d %H:%M}–{deadline:%H:%M} 放号窗口，07:00 进入提交。")
+            elif first_cycle:
+                log(f"跳过已开放空位，等待 {opening:%Y-%m-%d %H:%M}–{deadline:%H:%M} 放号窗口，07:00 进入提交。")
             else:
                 log(f"等待下一次放号准备：{opening:%Y-%m-%d %H:%M}–{deadline:%H:%M}，07:00 进入提交；已预约时段会自动跳过。")
             day = target_day(now().date() if preview else opening.date())
-            startup = first_cycle and not preview
+            startup = first_cycle and not preview and try_existing
             prepared = False
             preparation_failures = 0
             notice_attempted = False
