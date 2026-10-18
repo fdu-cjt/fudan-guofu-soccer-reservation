@@ -30,7 +30,7 @@ async function handle(c) {
   if(c.op==='start') {
     server=http.createServer((req,res)=>{
       if(req.url==='/') {res.end('<html><body>Local timing check</body></html>'); return;}
-      if(req.url==='/site/readDescription' && req.method==='POST') {
+      if(req.url==='/site/resource/read-description' && req.method==='POST') {
         res.setHeader('content-type','application/json');res.end('{"e":"OK"}');return;
       }
       const post=req.method==='POST';
@@ -53,7 +53,7 @@ async function handle(c) {
     return page.evaluate(browserFetch,c);
   }
   if(c.op==='noticeFixture') {
-    await page.setContent('<div class="introduce_ref1">场地预约须知测试内容</div><button id="confirm" disabled>1s后确定</button><script>setTimeout(()=>{const b=document.querySelector("#confirm");b.disabled=false;b.textContent="确定"},150);document.querySelector("#confirm").onclick=()=>fetch("/site/readDescription",{method:"POST"})</script>');
+    await page.setContent('<div class="introduce_ref1">场地预约须知测试内容</div><button id="confirm" disabled>1s后确定</button><script>setTimeout(()=>{const b=document.querySelector("#confirm");b.disabled=false;b.textContent="确定"},150);document.querySelector("#confirm").onclick=()=>fetch("/site/resource/read-description",{method:"POST"})</script>');
     const started=Date.now();
     const result=await confirmNotice(page,Date.now()+5000);
     return {...result,elapsedMs:Date.now()-started};

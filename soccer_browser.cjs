@@ -375,7 +375,7 @@ async function confirmNotice(currentPage, deadlineMs) {
   if (!content) throw new Error('预约须知内容为空，未自动确认');
   const confirm = currentPage.getByRole('button', { name: /^(?:\d+s后确定|确定)$/ }).first();
   const responsePromise = currentPage.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/site/readDescription') &&
+    new URL(response.url()).pathname.endsWith('/site/resource/read-description') &&
     response.request().method() === 'POST', { timeout: remaining() });
   const [response] = await Promise.all([responsePromise, confirm.click({ timeout: remaining() })]);
   const result = await response.json();
